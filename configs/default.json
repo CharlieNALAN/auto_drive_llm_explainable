@@ -1,0 +1,70 @@
+{
+    "perception": {
+        "object_detection": {
+            "model": "yolov8n.pt",
+            "confidence": 0.5,
+            "classes": [
+                0,
+                1,
+                2,
+                3,
+                5,
+                7
+            ],
+            "device": "cuda"
+        },
+        "lane_detection": {
+            "model": "deeplabv3_resnet50",
+            "device": "cuda"
+        }
+    },
+    "prediction": {
+        "method": "kalman",
+        "time_horizon": 3.0,
+        "dt": 0.1
+    },
+    "planning": {
+        "behavior": {
+            "max_speed": 30.0,
+            "safe_distance": 10.0,
+            "lane_change_threshold": 5.0
+        },
+        "path": {
+            "method": "frenet",
+            "planning_horizon": 50.0,
+            "lateral_safety_margin": 1.0,
+            "longitudinal_safety_margin": 5.0
+        }
+    },
+    "control": {
+        "lateral": {
+            "Kp": 1.5,
+            "Ki": 0.0,
+            "Kd": 0.0
+        },
+        "longitudinal": {
+            "Kp": 1.0,
+            "Ki": 0.1,
+            "Kd": 0.0
+        }
+    },
+    "explainability": {
+        "local": {
+            "model_path": "models/llama-2-7b-chat.gguf",
+            "context_length": 2048,
+            "temperature": 0.3,
+            "top_p": 0.9
+        },
+        "openai": {
+            "model": "gpt-3.5-turbo",
+            "temperature": 0.3,
+            "max_tokens": 100
+        },
+        "anthropic": {
+            "model": "claude-3-haiku",
+            "temperature": 0.3,
+            "max_tokens": 100
+        },
+        "prompt_template": "You are an autonomous driving system's explainability module. Explain the vehicle's current actions in clear, concise language.\n\nVehicle State:\n- Speed: {speed} km/h\n- Current controls: {controls}\n\nEnvironment:\n{environment}\n\nPlanning Decision:\n{planning_decision}\n\nBased on this information, explain why the vehicle is taking its current action in 1-2 short sentences:"
+    }
+}
