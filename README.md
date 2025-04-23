@@ -37,12 +37,9 @@ This project builds an explainable autonomous driving system using Large Languag
 
 1. Start CARLA server:
    ```
-   ./CarlaUE4.sh -quality-level=Low  
+   python run_carla.py --carla-path <path-to-carla-directory>
    ```
-   or
-   ```
-   ./CarlaUE4.exe -quality-level=Low  # For windows
-   ```
+
 
 2. Run the autonomous driving system:
    ```
