@@ -13,7 +13,8 @@ tqdm>=4.62.0
 ultralytics>=8.0.0  # For YOLO
 timm>=0.5.4  # For vision models
 # For running LLM locally
-llama-cpp-python>=0.1.0
+# llama-cpp-python>=0.1.0
 # Optional: for API-based LLMs 
 openai>=0.27.0
 anthropic>=0.3.0 
+pygame

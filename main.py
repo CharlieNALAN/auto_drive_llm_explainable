@@ -62,9 +62,9 @@ def load_config(config_path):
 
 def main():
     args = parse_args()
-    setup_logging(args.log)
-    logger = logging.getLogger(__name__)
-    logger.info("Starting LLM-based Explainable Autonomous Driving System")
+    # setup_logging(args.log)
+    # logger = logging.getLogger(__name__)
+    # logger.info("Starting LLM-based Explainable Autonomous Driving System")
     
     # Load configuration
     config = load_config(args.config)
