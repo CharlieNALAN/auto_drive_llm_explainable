@@ -9,6 +9,7 @@ import logging
 import json
 import pygame
 from pathlib import Path
+import numpy as np
 
 try:
     import carla
@@ -47,6 +48,10 @@ def setup_logging(level):
     if not isinstance(numeric_level, int):
         raise ValueError(f'Invalid log level: {level}')
     
+    # Create logs directory if it doesn't exist
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    
     logging.basicConfig(
         level=numeric_level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -62,9 +67,9 @@ def load_config(config_path):
 
 def main():
     args = parse_args()
-    # setup_logging(args.log)
-    # logger = logging.getLogger(__name__)
-    # logger.info("Starting LLM-based Explainable Autonomous Driving System")
+    setup_logging(args.log)
+    logger = logging.getLogger(__name__)
+    logger.info("Starting LLM-based Explainable Autonomous Driving System")
     
     # Load configuration
     config = load_config(args.config)
@@ -96,7 +101,7 @@ def main():
         
         # Initialize visualization if rendering is enabled
         if not args.no_rendering:
-            visualization = Visualization(width, height)
+            viz = Visualization(width, height)
         
         # Main loop
         clock = pygame.time.Clock()
@@ -114,7 +119,7 @@ def main():
                     
                     # Perception
                     detected_objects = object_detector.detect(camera_img)
-                    lane_info = lane_detector.detect(camera_img)
+                    lane_info = lane_detector.detect_lanes(camera_img)
                     
                     # Prediction
                     predicted_trajectories = trajectory_predictor.predict(detected_objects)
@@ -131,6 +136,10 @@ def main():
                     # Control
                     control = controller.control(trajectory, world.player)
                     world.player.apply_control(control)
+                    
+                    # Add control data to trajectory for visualization
+                    trajectory['control_data'] = controller.current_control.copy()
+                    trajectory['control_data']['speed'] = sensors.get_vehicle_speed()
                     
                     # Explainability
                     explainability_input = {
@@ -158,10 +167,25 @@ def main():
                     
                     # Visualization
                     if not args.no_rendering:
-                        visualization.display(
-                            camera_img, detected_objects, lane_info, 
-                            predicted_trajectories, trajectory, explanation
-                        )
+                        try:
+                            # Ensure data structures are properly formatted
+                            if camera_img is None or not isinstance(camera_img, np.ndarray):
+                                logger.warning("Camera image is missing or invalid for visualization")
+                                continue
+                                
+                            # Create default empty structures if any data is missing
+                            objects_to_display = detected_objects if detected_objects is not None else []
+                            lanes_to_display = lane_info if lane_info is not None else {'lanes': []}
+                            trajectories_to_display = predicted_trajectories if predicted_trajectories is not None else {}
+                            path_to_display = trajectory if trajectory is not None else {'points': []}
+                            explanation_to_display = explanation if explanation is not None else "No explanation available"
+                            
+                            viz.display(
+                                camera_img, objects_to_display, lanes_to_display, 
+                                trajectories_to_display, path_to_display, explanation_to_display
+                            )
+                        except Exception as e:
+                            logger.error(f"Error in visualization: {e}", exc_info=True)
                     
                 # Check for exit conditions
                 for event in pygame.event.get():
@@ -176,7 +200,7 @@ def main():
             sensors.destroy()
             world.destroy()
             if not args.no_rendering:
-                pygame.quit()
+                viz.destroy()
     
     except Exception as e:
         logger.error(f"Error in main loop: {e}", exc_info=True)

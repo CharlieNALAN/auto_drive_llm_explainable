@@ -16,7 +16,7 @@ class Visualization:
         
         self.width = width
         self.height = height
-        self.display = pygame.display.set_mode((width, height), pygame.HWSURFACE | pygame.DOUBLEBUF)
+        self.screen = pygame.display.set_mode((width, height), pygame.HWSURFACE | pygame.DOUBLEBUF)
         pygame.display.set_caption("LLM-Based Explainable Autonomous Driving")
         
         # Fonts
@@ -84,6 +84,11 @@ class Visualization:
         # Create the explanation box
         self._draw_explanation_box(camera_surface, explanation)
         
+        # Draw vehicle control info on the left side
+        if planned_trajectory and 'behavior' in planned_trajectory:
+            control_data = planned_trajectory.get('control_data', {})
+            self._draw_vehicle_info(camera_surface, control_data, planned_trajectory.get('behavior'))
+        
         # Display the final surface
         pygame.display.flip()
     
@@ -96,9 +101,9 @@ class Visualization:
         camera_surface = pygame.surfarray.make_surface(camera_img.swapaxes(0, 1))
         
         # Display the surface
-        self.display.blit(camera_surface, (0, 0))
+        self.screen.blit(camera_surface, (0, 0))
         
-        return self.display
+        return self.screen
     
     def _draw_detected_objects(self, surface, detected_objects):
         """Draw bounding boxes around detected objects."""
@@ -171,6 +176,72 @@ class Visualization:
         
         # Draw the explanation surface on the main surface
         surface.blit(explanation_surface, (0, self.height - 100))
+    
+    def _draw_vehicle_info(self, surface, control_data, behavior):
+        """Draw vehicle control information on the left side of the screen."""
+        # Create a semi-transparent panel for vehicle info
+        info_width = 200
+        info_height = 300
+        info_surface = pygame.Surface((info_width, info_height))
+        info_surface.set_alpha(220)
+        info_surface.fill(self.colors['black'])
+        
+        # Title
+        title = self.font_medium.render("Vehicle Controls", True, self.colors['white'])
+        title_x = (info_width - title.get_width()) // 2
+        info_surface.blit(title, (title_x, 10))
+        
+        # Get control values
+        throttle = control_data.get('throttle', 0.0)
+        brake = control_data.get('brake', 0.0)
+        steer = control_data.get('steer', 0.0)
+        
+        # Display current behavior
+        behavior_text = self.font_small.render(f"Behavior: {behavior}", True, self.colors['white'])
+        info_surface.blit(behavior_text, (10, 50))
+        
+        # Throttle information
+        throttle_text = self.font_small.render(f"Throttle: {throttle:.2f}", True, self.colors['green'])
+        info_surface.blit(throttle_text, (10, 80))
+        
+        # Throttle bar
+        pygame.draw.rect(info_surface, self.colors['gray'], (10, 105, 180, 15))
+        pygame.draw.rect(info_surface, self.colors['green'], (10, 105, int(180 * throttle), 15))
+        
+        # Brake information
+        brake_text = self.font_small.render(f"Brake: {brake:.2f}", True, self.colors['red'])
+        info_surface.blit(brake_text, (10, 130))
+        
+        # Brake bar
+        pygame.draw.rect(info_surface, self.colors['gray'], (10, 155, 180, 15))
+        pygame.draw.rect(info_surface, self.colors['red'], (10, 155, int(180 * brake), 15))
+        
+        # Steering information
+        steer_text = self.font_small.render(f"Steering: {steer:.2f}", True, self.colors['blue'])
+        info_surface.blit(steer_text, (10, 180))
+        
+        # Steering indicator (centered at 0, left is negative, right is positive)
+        pygame.draw.rect(info_surface, self.colors['gray'], (10, 205, 180, 15))
+        center_x = 10 + 90  # Center point of the steering bar
+        pygame.draw.rect(info_surface, self.colors['blue'], 
+                         (center_x, 205, int(90 * steer), 15) if steer >= 0 else 
+                         (center_x + int(90 * steer), 205, int(-90 * steer), 15))
+        pygame.draw.line(info_surface, self.colors['white'], (center_x, 200), (center_x, 225), 1)
+        
+        # Speed information if available
+        if 'speed' in control_data:
+            speed = control_data.get('speed', 0.0)
+            speed_text = self.font_small.render(f"Speed: {speed:.1f} km/h", True, self.colors['cyan'])
+            info_surface.blit(speed_text, (10, 230))
+        
+        # Additional information like lateral error if available
+        if 'lateral_error' in control_data:
+            lat_error = control_data.get('lateral_error', 0.0)
+            error_text = self.font_small.render(f"Lat Error: {lat_error:.2f} m", True, self.colors['yellow'])
+            info_surface.blit(error_text, (10, 260))
+        
+        # Place the info panel on the main surface
+        surface.blit(info_surface, (10, 10))
     
     def destroy(self):
         """Clean up resources."""

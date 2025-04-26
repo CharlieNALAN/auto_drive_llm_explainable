@@ -94,29 +94,64 @@ class BehaviorPlanner:
             self._update_state(new_state, reason)
             return new_state, reason
         
-        # Check for obstacles ahead
+        # Check for obstacles ahead with improved detection
         obstacle = self._detect_obstacles_ahead(detected_objects, predicted_trajectories, ego_location, ego_transform)
+        
         if obstacle:
-            if obstacle.get('distance', float('inf')) < self.safe_distance / 2:
-                # Very close obstacle - emergency stop
+            # Get the collision risk and distance
+            collision_risk = obstacle.get('collision_risk', 1.0)
+            distance = obstacle.get('distance', float('inf'))
+            obstacle_type = obstacle.get('type', 'obstacle')
+            obstacle_speed = obstacle.get('speed', 0)
+            
+            # Adaptive safety distance based on speed
+            # Higher speed requires larger safety margins
+            adaptive_safety_distance = self.safe_distance * (1 + ego_speed / 50.0)
+            
+            # Very high collision risk or very close - emergency stop
+            if collision_risk > 0.8 or distance < adaptive_safety_distance * 0.4:
                 new_state = BehaviorState.EMERGENCY_STOP
-                reason = f"Emergency stopping for {obstacle.get('type', 'obstacle')} at {obstacle.get('distance', 'unknown')} meters"
+                reason = f"Emergency stopping for {obstacle_type} at {distance:.1f} meters with collision risk {collision_risk:.2f}"
                 self._update_state(new_state, reason)
                 return new_state, reason
-            elif obstacle.get('distance', float('inf')) < self.safe_distance:
-                # Close enough to follow or stop
-                if obstacle.get('speed', 0) > 0:
-                    # Moving obstacle - follow it
-                    new_state = BehaviorState.FOLLOW_VEHICLE
-                    reason = f"Following {obstacle.get('type', 'vehicle')} at {obstacle.get('distance', 'unknown')} meters, traveling at {obstacle.get('speed', 'unknown')} km/h"
+            
+            # High collision risk - check for evasive maneuvers
+            elif collision_risk > 0.5 or distance < adaptive_safety_distance * 0.7:
+                # Check if lane changes are viable
+                left_lane_viable = self._check_lane_change_viable('left', detected_objects, predicted_trajectories, lane_info)
+                right_lane_viable = self._check_lane_change_viable('right', detected_objects, predicted_trajectories, lane_info)
+                
+                # If a lane change is viable, choose the safest option
+                if left_lane_viable.get('viable', False) and (not right_lane_viable.get('viable', False) or 
+                                                             left_lane_viable.get('safety_score', 0) > right_lane_viable.get('safety_score', 0)):
+                    new_state = BehaviorState.PREPARE_LANE_CHANGE_LEFT
+                    reason = f"Preparing to change to left lane to avoid {obstacle_type} with collision risk {collision_risk:.2f}"
                     self._update_state(new_state, reason)
                     return new_state, reason
+                
+                elif right_lane_viable.get('viable', False):
+                    new_state = BehaviorState.PREPARE_LANE_CHANGE_RIGHT
+                    reason = f"Preparing to change to right lane to avoid {obstacle_type} with collision risk {collision_risk:.2f}"
+                    self._update_state(new_state, reason)
+                    return new_state, reason
+                
+                # If lane changes aren't viable, slow down
                 else:
-                    # Stopped obstacle - wait
-                    new_state = BehaviorState.STOP_FOR_OBSTACLE
-                    reason = f"Stopping for stationary {obstacle.get('type', 'obstacle')} at {obstacle.get('distance', 'unknown')} meters"
+                    new_state = BehaviorState.FOLLOW_VEHICLE
+                    deceleration_factor = min(1.0, collision_risk * 2)  # Higher risk = stronger deceleration
+                    target_speed = max(0, obstacle_speed - 5 * deceleration_factor)
+                    reason = f"Following {obstacle_type} at {distance:.1f} meters while slowing to {target_speed:.1f} km/h"
                     self._update_state(new_state, reason)
                     return new_state, reason
+            
+            # Moderate collision risk - follow at safe distance
+            elif collision_risk > 0.2 or distance < adaptive_safety_distance:
+                # Adjust speed based on the obstacle's speed and distance
+                new_state = BehaviorState.FOLLOW_VEHICLE
+                target_speed = min(ego_speed, obstacle_speed * 0.9)  # Target slightly slower than obstacle
+                reason = f"Following {obstacle_type} at {distance:.1f} meters at {target_speed:.1f} km/h"
+                self._update_state(new_state, reason)
+                return new_state, reason
         
         # Check for lane change opportunities if we're traveling at a reasonable speed
         if ego_speed > 15:  # Only consider lane changes above 15 km/h
@@ -198,24 +233,45 @@ class BehaviorPlanner:
         # Calculate ego vehicle's forward vector
         forward_vector = ego_transform.get_forward_vector()
         
+        # Define a wider detection zone to improve peripheral vision
+        lane_width = 3.5  # standard lane width in meters
+        peripheral_vision = 2.0  # additional width on each side
+        
         for obj in detected_objects:
             if obj['class_id'] in [0, 1, 2, 3, 5, 7]:  # Person, bicycle, car, motorcycle, bus, truck
                 # Get center point of the bbox
                 bbox = obj['bbox']
                 center_x = (bbox[0] + bbox[2]) / 2
                 center_y = (bbox[1] + bbox[3]) / 2
+                bbox_width = bbox[2] - bbox[0]
                 
                 # Convert pixel position to 3D location (simplified)
                 # In practice, you would use depth information or 3D detection
-                obj_location_relative = carla.Location(x=30, y=(center_x - 640) / 10, z=0)
+                obj_location_relative = carla.Location(
+                    x=30 * (720 - center_y) / 720,  # Scale distance by vertical position
+                    y=(center_x - 640) / 10, 
+                    z=0
+                )
                 
-                # Check if the object is ahead (positive dot product with forward vector)
+                # Calculate lateral distance (perpendicular to driving direction)
+                lateral_distance = abs(obj_location_relative.y)
+                
+                # Check if object is within our extended detection zone
+                # and check if the object is ahead (positive dot product with forward vector)
                 direction = carla.Vector3D(obj_location_relative.x, obj_location_relative.y, 0)
                 dot_product = forward_vector.x * direction.x + forward_vector.y * direction.y
                 
-                if dot_product > 0:  # Object is ahead
-                    # Calculate distance (simplified)
+                # Wider detection zone for obstacles
+                extended_lane_width = lane_width + peripheral_vision
+                
+                # Object is ahead and within our detection zone
+                if dot_product > 0 and lateral_distance < extended_lane_width:
+                    # Calculate distance (improved to consider object size)
                     distance = obj_location_relative.x
+                    
+                    # Scale distance based on object size (larger objects should trigger earlier reactions)
+                    obj_size_factor = bbox_width / 100.0  # Normalize by typical size
+                    effective_distance = distance / (1 + obj_size_factor)
                     
                     # Determine object speed from trajectories
                     speed = 0
@@ -230,16 +286,24 @@ class BehaviorPlanner:
                             displacement = math.sqrt(dx**2 + dy**2)
                             speed = displacement / traj['time_horizon'] * 3.6  # m/s to km/h
                     
+                    # Calculate collision risk based on distance, speed, and lateral position
+                    collision_risk = 1.0
+                    if distance > 0:
+                        collision_risk = (1.0 / effective_distance) * (1.0 + 0.1 * speed) * (1.0 - lateral_distance / extended_lane_width)
+                    
                     obstacles.append({
                         'id': obj['id'],
                         'type': ['pedestrian', 'bicycle', 'car', 'motorcycle', 'bus', 'truck'][obj['class_id']],
                         'distance': distance,
-                        'speed': speed
+                        'effective_distance': effective_distance,
+                        'speed': speed,
+                        'lateral_distance': lateral_distance,
+                        'collision_risk': collision_risk
                     })
         
-        # Return the closest obstacle
+        # Return the obstacle with highest collision risk
         if obstacles:
-            return min(obstacles, key=lambda x: x['distance'])
+            return max(obstacles, key=lambda x: x['collision_risk'])
         else:
             return None
     
