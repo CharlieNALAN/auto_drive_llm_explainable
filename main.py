@@ -119,7 +119,7 @@ def main():
                     
                     # Perception
                     detected_objects = object_detector.detect(camera_img)
-                    lane_info = lane_detector.detect_lanes(camera_img)
+                    lane_info = lane_detector.detect(camera_img)
                     
                     # Prediction
                     predicted_trajectories = trajectory_predictor.predict(detected_objects)
