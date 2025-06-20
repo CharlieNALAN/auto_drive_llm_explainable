@@ -45,14 +45,31 @@ class CarlaWorld:
         blueprint = self.blueprint_library.find(vehicle_type)
         blueprint.set_attribute('role_name', 'hero')
         
-        # Try to spawn the vehicle
-        spawn_point = random.choice(spawn_points)
-        self.player = self.world.try_spawn_actor(blueprint, spawn_point)
+        # Try multiple spawn points to avoid obstacles
+        self.player = None
+        random.shuffle(spawn_points)
+        
+        for spawn_point in spawn_points[:10]:  # Try up to 10 spawn points
+            # Add small offset to avoid collision issues
+            spawn_point.location.z += 0.1
+            
+            self.player = self.world.try_spawn_actor(blueprint, spawn_point)
+            if self.player is not None:
+                break
         
         if self.player is None:
-            raise RuntimeError("Failed to spawn player vehicle. Retry with different spawn point or CARLA map.")
+            raise RuntimeError("Failed to spawn player vehicle after trying multiple spawn points.")
         
-        print(f"Player vehicle spawned: {self.player.type_id}")
+        # Ensure vehicle is not stuck by applying a small initial force
+        import time
+        time.sleep(0.1)  # Small delay to ensure physics initialization
+        
+        # Set initial vehicle physics to prevent being stuck
+        physics_control = self.player.get_physics_control()
+        physics_control.use_sweep_wheel_collision = True
+        self.player.apply_physics_control(physics_control)
+        
+        print(f"Player vehicle spawned: {self.player.type_id} at {spawn_point.location}")
     
     def spawn_npc_vehicles(self, num_vehicles=30):
         """Spawn NPC vehicles using the Traffic Manager."""
@@ -316,15 +333,15 @@ class CarlaSensors:
         }
     
     def get_data(self):
-        """Check if sensor data is available."""
-        return self.camera_data is not None and self.lidar_data is not None
+        """Check if camera data is available (minimum requirement)."""
+        return self.camera_data is not None
     
     def get_vehicle_speed(self):
-        """Get vehicle speed in km/h."""
+        """Get vehicle speed in m/s."""
         if self.vehicle:
             velocity = self.vehicle.get_velocity()
-            # Calculate speed in km/h
-            return 3.6 * np.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)
+            # Calculate speed in m/s
+            return np.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)
         return 0.0
     
     def destroy(self):

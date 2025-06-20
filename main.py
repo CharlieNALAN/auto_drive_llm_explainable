@@ -17,14 +17,30 @@ except ImportError:
     raise ImportError("CARLA Python API module not found. Make sure it's in your PYTHONPATH")
 
 from src.perception.object_detection import ObjectDetector
+
+try:
+    from src.perception.openvino_lane_detector import OpenVINOLaneDetector
+    OPENVINO_AVAILABLE = True
+except ImportError:
+    OPENVINO_AVAILABLE = False
+
 from src.perception.lane_detection import LaneDetector
+from src.perception.camera_geometry import CameraGeometry
 from src.prediction.trajectory_prediction import TrajectoryPredictor
 from src.planning.behavior_planner import BehaviorPlanner
 from src.planning.path_planner import PathPlanner
 from src.control.pid_controller import PIDController
+from src.control.pure_pursuit import PurePursuitPlusPID
 from src.explainability.llm_explainer import LLMExplainer
 from src.utils.carla_utils import CarlaWorld, CarlaSensors
 from src.utils.visualization import Visualization
+from src.utils.trajectory_utils import (
+    get_trajectory_from_lane_detector, 
+    get_trajectory_from_map, 
+    send_control,
+    dist_point_linestring
+)
+from src.control.get_target_point import get_curvature
 
 def parse_args():
     parser = argparse.ArgumentParser(description="LLM-based Explainable Autonomous Driving System")
@@ -88,13 +104,28 @@ def main():
         # Set up sensors
         sensors = CarlaSensors(world.world, world.player, width, height)
         
-        # Initialize modules
+        # Initialize camera geometry for lane detection
+        cg = CameraGeometry()
+        
+        # Initialize modules with new approach
         object_detector = ObjectDetector(config["perception"]["object_detection"])
-        lane_detector = LaneDetector(config["perception"]["lane_detection"])
+        
+        # Try OpenVINO lane detector first, fallback to regular lane detector
+        try:
+            if OPENVINO_AVAILABLE:
+                lane_detector = OpenVINOLaneDetector(cam_geom=cg)
+                print("✓ Using OpenVINO lane detector")
+            else:
+                raise ImportError("OpenVINO not available")
+        except Exception as e:
+            print(f"ℹ OpenVINO lane detector failed ({e}), using fallback detector")
+            lane_detector = LaneDetector(config.get("perception", {}).get("lane_detection"), cam_geom=cg)
         trajectory_predictor = TrajectoryPredictor(config["prediction"])
         behavior_planner = BehaviorPlanner(config["planning"]["behavior"])
         path_planner = PathPlanner(config["planning"]["path"])
-        controller = PIDController(config["control"])
+        
+        # Use proven pure pursuit controller from working project
+        controller = PurePursuitPlusPID()
         
         # Initialize LLM explainer
         explainer = LLMExplainer(config["explainability"], args.llm_model)
@@ -115,42 +146,97 @@ def main():
                 if sensors.get_data():
                     # Process sensor data
                     camera_img = sensors.camera_data
-                    lidar_data = sensors.lidar_data
                     
-                    # Perception
+                    # Get vehicle state
+                    vehicle_speed = sensors.get_vehicle_speed()
+                    
+                    # Simplified lane-following approach from working project
+                    try:
+                        # Primary approach: Use lane detector
+                        trajectory, img = get_trajectory_from_lane_detector(lane_detector, camera_img)
+                        lane_detection_success = True
+                    except Exception as e:
+                        print(f"Lane detection failed: {e}. Using map fallback.")
+                        # Fallback: Use CARLA map navigation
+                        trajectory = get_trajectory_from_map(world.world.get_map(), world.player)
+                        img = None
+                        lane_detection_success = False
+                    
+                    # Adaptive speed control based on road curvature
+                    max_curvature = get_curvature(np.array(trajectory))
+                    if max_curvature > 0.005:
+                        # Limit speed when turning (adapted from working project)
+                        move_speed = np.abs(5.56 - 20 * max_curvature)
+                        move_speed = max(move_speed, 3.0)  # Minimum speed of 3 m/s (10.8 km/h)
+                    else:
+                        move_speed = 5.56  # 20 km/h in m/s for straight roads
+                    
+                    # Pure pursuit control (proven approach)
+                    dt = 1.0 / 30.0  # 30 FPS
+                    throttle, steer = controller.get_control(trajectory, vehicle_speed, move_speed, dt)
+                    
+                    # Apply control to vehicle
+                    brake = 0.0
+                    if throttle < 0:
+                        brake = -throttle
+                        throttle = 0.0
+                    
+                    send_control(world.player, throttle, steer, brake)
+                    
+                    # Calculate performance metrics
+                    cross_track_error = dist_point_linestring(np.array([0, 0]), trajectory)
+                    
+                    # For LLM explanation: still run perception and planning for context
                     detected_objects = object_detector.detect(camera_img)
-                    lane_info = lane_detector.detect(camera_img)
                     
-                    # Prediction
+                    # Format lane_info properly for visualization
+                    if trajectory is not None:
+                        lane_info = {
+                            'lanes': [{'points': trajectory.tolist() if hasattr(trajectory, 'tolist') else trajectory}],
+                            'trajectory': trajectory,
+                            'success': lane_detection_success,
+                            'cross_track_error': cross_track_error
+                        }
+                    else:
+                        lane_info = {
+                            'lanes': [],
+                            'trajectory': [],
+                            'success': False,
+                            'cross_track_error': cross_track_error
+                        }
+                    
                     predicted_trajectories = trajectory_predictor.predict(detected_objects)
                     
-                    # Planning
+                    # Simplified behavior planning for explanation
                     behavior_command, behavior_reason = behavior_planner.plan(
                         detected_objects, lane_info, predicted_trajectories, world.player
                     )
                     
-                    trajectory = path_planner.plan(
-                        behavior_command, detected_objects, lane_info, predicted_trajectories, world.player
-                    )
+                    # Create control data for recording
+                    control_data = {
+                        'throttle': throttle,
+                        'steer': steer,
+                        'brake': brake,
+                        'speed': vehicle_speed,
+                        'target_speed': move_speed,
+                        'cross_track_error': cross_track_error,
+                        'curvature': max_curvature
+                    }
                     
-                    # Control
-                    control = controller.control(trajectory, world.player)
-                    world.player.apply_control(control)
-                    
-                    # Add control data to trajectory for visualization
-                    trajectory['control_data'] = controller.current_control.copy()
-                    trajectory['control_data']['speed'] = sensors.get_vehicle_speed()
-                    
-                    # Explainability
+                    # Explainability with enhanced context
                     explainability_input = {
                         "vehicle_state": {
-                            "speed": sensors.get_vehicle_speed(),
+                            "speed": vehicle_speed,
+                            "target_speed": move_speed,
                             "location": world.player.get_location(),
-                            "control": control
+                            "control": control_data,
+                            "cross_track_error": cross_track_error,
+                            "road_curvature": max_curvature
                         },
                         "perception": {
                             "detected_objects": detected_objects,
-                            "lane_info": lane_info
+                            "lane_info": lane_info,
+                            "lane_detection_method": "deep_learning" if lane_detection_success else "map_fallback"
                         },
                         "prediction": {
                             "trajectories": predicted_trajectories
@@ -158,7 +244,8 @@ def main():
                         "planning": {
                             "behavior": behavior_command,
                             "reason": behavior_reason,
-                            "trajectory": trajectory
+                            "trajectory": trajectory,
+                            "control_method": "pure_pursuit"
                         }
                     }
                     
@@ -173,12 +260,30 @@ def main():
                                 logger.warning("Camera image is missing or invalid for visualization")
                                 continue
                                 
-                            # Create default empty structures if any data is missing
+                            # Create visualization data structures
                             objects_to_display = detected_objects if detected_objects is not None else []
                             lanes_to_display = lane_info if lane_info is not None else {'lanes': []}
                             trajectories_to_display = predicted_trajectories if predicted_trajectories is not None else {}
-                            path_to_display = trajectory if trajectory is not None else {'points': []}
+                            
+                            # Path to display - convert trajectory numpy array to expected format
+                            if trajectory is not None:
+                                path_to_display = {
+                                    'points': trajectory.tolist() if hasattr(trajectory, 'tolist') else trajectory,
+                                    'control_data': control_data
+                                }
+                            else:
+                                path_to_display = {'points': []}
+                            
                             explanation_to_display = explanation if explanation is not None else "No explanation available"
+                            
+                            # Additional debug info for new system
+                            debug_info = {
+                                'lane_detection_success': lane_detection_success,
+                                'cross_track_error': cross_track_error,
+                                'curvature': max_curvature,
+                                'target_speed': move_speed,
+                                'actual_speed': vehicle_speed
+                            }
                             
                             viz.display(
                                 camera_img, objects_to_display, lanes_to_display, 

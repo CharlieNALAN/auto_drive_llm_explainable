@@ -196,7 +196,16 @@ Based on this information, explain why the vehicle is taking its current action 
         
         # Format controls
         control = vehicle_state.get('control', {})
-        controls_text = f"throttle={control.throttle:.2f}, brake={control.brake:.2f}, steer={control.steer:.2f}"
+        # Handle both object and dictionary formats
+        if hasattr(control, 'throttle'):
+            # Object format
+            controls_text = f"throttle={control.throttle:.2f}, brake={control.brake:.2f}, steer={control.steer:.2f}"
+        else:
+            # Dictionary format
+            throttle = control.get('throttle', 0.0)
+            brake = control.get('brake', 0.0)
+            steer = control.get('steer', 0.0)
+            controls_text = f"throttle={throttle:.2f}, brake={brake:.2f}, steer={steer:.2f}"
         
         # Format environment information (detected objects, etc.)
         environment_items = []

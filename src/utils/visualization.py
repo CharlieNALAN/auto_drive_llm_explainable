@@ -130,31 +130,89 @@ class Visualization:
     def _draw_lane_lines(self, surface, lane_info):
         """Draw lane lines on the camera view."""
         if lane_info and 'lanes' in lane_info:
+            lanes_drawn = 0
             for lane in lane_info['lanes']:
+                # Check if lane has points
+                if isinstance(lane, dict) and 'points' in lane:
+                    points = lane['points']
+                elif isinstance(lane, (list, np.ndarray)):
+                    points = lane
+                else:
+                    continue
+                
+                # Skip if points is empty
+                if len(points) < 2:
+                    continue
+                
+                # Debug: Print first few world coordinates
+                if lanes_drawn == 0:  # Only for first lane to avoid spam
+                    world_sample = points[:3] if len(points) >= 3 else points
+                    print(f"Lane world coords (first 3): {world_sample}")
+                
+                # Convert world coordinates to screen coordinates
+                screen_points = self._world_to_screen_coords(points)
+                
+                # Debug: Print converted screen coordinates
+                if lanes_drawn == 0 and len(screen_points) > 0:
+                    screen_sample = screen_points[:3] if len(screen_points) >= 3 else screen_points
+                    print(f"Lane screen coords (first 3): {screen_sample}")
+                
                 # Draw lane markings
-                points = lane['points']
-                for i in range(len(points) - 1):
-                    pygame.draw.line(surface, self.colors['yellow'], 
-                                    (int(points[i][0]), int(points[i][1])), 
-                                    (int(points[i+1][0]), int(points[i+1][1])), 2)
+                lines_drawn = 0
+                for i in range(len(screen_points) - 1):
+                    try:
+                        # Only draw if points are on screen
+                        p1 = screen_points[i]
+                        p2 = screen_points[i+1]
+                        # More permissive bounds check for debugging
+                        if (-50 <= p1[0] <= self.width + 50 and -50 <= p1[1] <= self.height + 50 and
+                            -50 <= p2[0] <= self.width + 50 and -50 <= p2[1] <= self.height + 50):
+                            pygame.draw.line(surface, self.colors['yellow'], 
+                                            (int(p1[0]), int(p1[1])), 
+                                            (int(p2[0]), int(p2[1])), 3)
+                            lines_drawn += 1
+                    except (IndexError, TypeError, ValueError) as e:
+                        # Skip if point format is incorrect
+                        continue
+                
+                if lanes_drawn == 0:
+                    print(f"Drew {lines_drawn} lane line segments")
+                lanes_drawn += 1
     
     def _draw_trajectories(self, surface, predicted_trajectories, planned_trajectory):
         """Draw predicted and planned trajectories."""
         # Draw predicted trajectories for other vehicles
         for vehicle_id, trajectory in predicted_trajectories.items():
-            points = trajectory['points']
-            for i in range(len(points) - 1):
-                pygame.draw.line(surface, self.colors['red'], 
-                                (int(points[i][0]), int(points[i][1])), 
-                                (int(points[i+1][0]), int(points[i+1][1])), 1)
+            if 'points' in trajectory:
+                points = trajectory['points']
+                screen_points = self._world_to_screen_coords(points)
+                for i in range(len(screen_points) - 1):
+                    try:
+                        p1 = screen_points[i]
+                        p2 = screen_points[i+1]
+                        if (0 <= p1[0] <= self.width and 0 <= p1[1] <= self.height and
+                            0 <= p2[0] <= self.width and 0 <= p2[1] <= self.height):
+                            pygame.draw.line(surface, self.colors['red'], 
+                                            (int(p1[0]), int(p1[1])), 
+                                            (int(p2[0]), int(p2[1])), 2)
+                    except (IndexError, TypeError, ValueError):
+                        continue
         
         # Draw planned trajectory for ego vehicle
         if planned_trajectory and 'points' in planned_trajectory:
             points = planned_trajectory['points']
-            for i in range(len(points) - 1):
-                pygame.draw.line(surface, self.colors['green'], 
-                                (int(points[i][0]), int(points[i][1])), 
-                                (int(points[i+1][0]), int(points[i+1][1])), 3)
+            screen_points = self._world_to_screen_coords(points)
+            for i in range(len(screen_points) - 1):
+                try:
+                    p1 = screen_points[i]
+                    p2 = screen_points[i+1]
+                    if (0 <= p1[0] <= self.width and 0 <= p1[1] <= self.height and
+                        0 <= p2[0] <= self.width and 0 <= p2[1] <= self.height):
+                        pygame.draw.line(surface, self.colors['green'], 
+                                        (int(p1[0]), int(p1[1])), 
+                                        (int(p2[0]), int(p2[1])), 4)
+                except (IndexError, TypeError, ValueError):
+                    continue
     
     def _draw_explanation_box(self, surface, explanation):
         """Draw explanation box at the bottom of the screen."""
@@ -242,6 +300,53 @@ class Visualization:
         
         # Place the info panel on the main surface
         surface.blit(info_surface, (10, 10))
+    
+    def _world_to_screen_coords(self, world_points):
+        """
+        Convert world coordinates (vehicle reference frame) to screen pixel coordinates.
+        
+        Args:
+            world_points: Array of [x, y] points in world coordinates (meters)
+            
+        Returns:
+            Array of [x, y] points in screen pixel coordinates
+        """
+        if not world_points or len(world_points) == 0:
+            return []
+            
+        world_points = np.array(world_points)
+        screen_points = []
+        
+        # Camera parameters (approximate values for visualization)
+        # These should match your camera geometry and field of view
+        pixels_per_meter = 50  # Rough conversion: 50 pixels per meter
+        horizon_y = self.height * 0.4  # Horizon line at 40% from top
+        vanishing_point_x = self.width / 2  # Center of screen
+        
+        for point in world_points:
+            x_world, y_world = point[0], point[1]
+            
+            # Simple perspective projection
+            # x_world: forward distance (positive forward)
+            # y_world: lateral distance (positive left)
+            
+            if x_world <= 0:  # Skip points behind or at the vehicle
+                continue
+                
+            # Perspective scaling based on distance
+            scale = 1.0 / max(x_world * 0.1, 0.1)  # Perspective scaling
+            
+            # Convert to screen coordinates
+            screen_x = vanishing_point_x - (y_world * pixels_per_meter * scale)
+            screen_y = horizon_y + (30 * scale)  # Lower on screen for closer points
+            
+            # Clamp to reasonable screen bounds (with some margin)
+            screen_x = max(-100, min(self.width + 100, screen_x))
+            screen_y = max(0, min(self.height, screen_y))
+            
+            screen_points.append([screen_x, screen_y])
+        
+        return screen_points
     
     def destroy(self):
         """Clean up resources."""
