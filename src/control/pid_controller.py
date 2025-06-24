@@ -143,6 +143,24 @@ class PIDController:
         
         # Counters for emergency maneuvers
         self.emergency_counter = 0
+        
+        # Try to import and initialize pure pursuit controller for better lane following
+        try:
+            from .pure_pursuit_controller import PurePursuitPlusPIDController
+            self.pure_pursuit_controller = PurePursuitPlusPIDController(
+                Kp=longitudinal_config.get('Kp', 0.7),
+                Ki=longitudinal_config.get('Ki', 0.05),
+                Kd=longitudinal_config.get('Kd', 0.02),
+                K_dd=config.get('lookahead_factor', 0.4)
+            )
+            self.use_pure_pursuit = True
+            print("Pure pursuit controller enabled for lane following")
+        except ImportError:
+            self.use_pure_pursuit = False
+            print("Pure pursuit controller not available, using PID only")
+        
+        # Store current control for debugging
+        self.current_control = {}
     
     def control(self, trajectory, ego_vehicle):
         """
@@ -198,6 +216,37 @@ class PIDController:
         if is_emergency or ego_speed < 5.0:
             target_idx = 0
             target_point = waypoints[0]
+        
+        # Use pure pursuit controller if available and we have trajectory
+        if self.use_pure_pursuit and len(waypoints) >= 2:
+            # Convert world waypoints to vehicle-relative coordinates
+            vehicle_waypoints = self._world_to_vehicle_coordinates(waypoints, ego_location, ego_rotation)
+            
+            # Get target speed
+            target_speed = speed_profile[0] / 3.6 if speed_profile else ego_speed / 3.6  # Convert to m/s
+            current_speed = ego_speed / 3.6  # Convert to m/s
+            
+            # Get control from pure pursuit controller
+            dt = 1.0 / 20.0  # Assume 20 Hz update rate
+            acceleration, steering = self.pure_pursuit_controller.get_control(
+                vehicle_waypoints, current_speed, target_speed, dt
+            )
+            
+            # Convert acceleration to throttle/brake
+            if acceleration > 0:
+                control.throttle = min(0.7, acceleration)  # Limit max throttle
+                control.brake = 0.0
+            else:
+                control.throttle = 0.0
+                control.brake = min(1.0, -acceleration)  # Convert negative acceleration to brake
+            
+            # Apply steering with some smoothing
+            control.steer = np.clip(steering, -1.0, 1.0)
+            
+        else:
+            # Fall back to PID control
+            self._apply_pid_control(control, ego_location, ego_rotation, ego_speed, 
+                                   target_point, speed_profile, is_emergency)
         
         # Get target speed (with more aggressive deceleration for emergencies)
         target_speed = speed_profile[target_idx]
@@ -363,4 +412,77 @@ class PIDController:
             angle -= 2.0 * math.pi
         while angle < -math.pi:
             angle += 2.0 * math.pi
-        return angle 
+        return angle
+    
+    def _world_to_vehicle_coordinates(self, world_waypoints, ego_location, ego_rotation):
+        """Convert world coordinates to vehicle-relative coordinates."""
+        vehicle_waypoints = []
+        
+        # Get vehicle's forward and right vectors
+        yaw = math.radians(ego_rotation.yaw)
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+        
+        for waypoint in world_waypoints:
+            # Calculate relative position
+            dx = waypoint[0] - ego_location.x
+            dy = waypoint[1] - ego_location.y
+            
+            # Transform to vehicle coordinates
+            vehicle_x = dx * cos_yaw + dy * sin_yaw
+            vehicle_y = -dx * sin_yaw + dy * cos_yaw
+            
+            vehicle_waypoints.append((vehicle_x, vehicle_y))
+        
+        return vehicle_waypoints
+    
+    def _apply_pid_control(self, control, ego_location, ego_rotation, ego_speed, 
+                          target_point, speed_profile, is_emergency):
+        """Apply traditional PID control as fallback."""
+        # Calculate lateral error
+        lateral_error = self._calculate_lateral_error(ego_location, ego_rotation, target_point)
+        
+        # Calculate steering using lateral PID
+        steering_output = self.lateral_pid.update(lateral_error)
+        
+        # Apply steering limits and smoothing
+        steering_output = max(-self.max_steering_angle, min(self.max_steering_angle, steering_output))
+        
+        # Smooth steering to prevent jerky movements
+        alpha = 0.7  # Smoothing factor
+        control.steer = alpha * steering_output + (1 - alpha) * self.prev_steering
+        self.prev_steering = control.steer
+        
+        # Speed control
+        if speed_profile:
+            target_speed = speed_profile[0]
+        else:
+            target_speed = 30.0  # Default target speed
+            
+        # Emergency braking override
+        if is_emergency:
+            control.throttle = 0.0
+            control.brake = 1.0
+        else:
+            # Calculate speed error
+            speed_error = target_speed - ego_speed
+            
+            # Use longitudinal PID for speed control
+            speed_output = self.longitudinal_pid.update(speed_error)
+            
+            if speed_output > 0:
+                control.throttle = min(0.7, speed_output)
+                control.brake = 0.0
+            else:
+                control.throttle = 0.0
+                control.brake = min(1.0, -speed_output)
+        
+        # Store control values for debugging
+        self.current_control = {
+            'throttle': control.throttle,
+            'brake': control.brake,
+            'steer': control.steer,
+            'target_speed': target_speed if 'target_speed' in locals() else 0,
+            'current_speed': ego_speed,
+            'lateral_error': lateral_error if 'lateral_error' in locals() else 0
+        } 

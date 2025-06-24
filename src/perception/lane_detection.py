@@ -7,6 +7,8 @@ import torch
 import cv2
 import torchvision.transforms as transforms
 from pathlib import Path
+from .openvino_lane_detector import OpenVINOLaneDetector
+from .camera_geometry import CameraGeometry
 
 # Import segmentation models
 try:
@@ -16,7 +18,7 @@ except ImportError:
     print("Warning: Could not import segmentation models from torchvision. Make sure you have the correct version installed.")
 
 class LaneDetector:
-    """Class to handle lane detection using semantic segmentation."""
+    """Class to handle lane detection using OpenVINO implementation from successful project."""
     
     def __init__(self, config):
         """
@@ -26,28 +28,26 @@ class LaneDetector:
             config: Configuration dictionary for lane detection.
         """
         self.config = config
-        self.device = config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
-        self.model_name = config.get('model', 'deeplabv3_resnet50')
+        self.device = config.get('device', 'cpu')
+        self.model_name = config.get('model', 'openvino')
         
-        # Initialize model
-        self.model = self._load_model()
-        self.model.eval()
-        self.model.to(self.device)
+        # Initialize camera geometry for CARLA
+        self.camera_geometry = CameraGeometry(
+            height=1.3,  # Camera height in meters
+            pitch_deg=5,  # Camera pitch angle
+            image_width=1024,  # Image width
+            image_height=512,  # Image height  
+            field_of_view_deg=45  # Field of view
+        )
         
-        # Setup image transformation
-        self.transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
+        # Initialize OpenVINO lane detector
+        self.openvino_detector = OpenVINOLaneDetector(
+            cam_geom=self.camera_geometry,
+            model_path=config.get('openvino_model_path'),
+            device="CPU"  # OpenVINO typically runs on CPU
+        )
         
-        print(f"Lane detector initialized with model: {self.model_name} on device: {self.device}")
-        
-        # Lane color range in HSV - expanded ranges for better detection
-        self.yellow_lower = np.array([15, 60, 60])  # Lower saturation and value thresholds
-        self.yellow_upper = np.array([40, 255, 255])  # Wider hue range
-        
-        self.white_lower = np.array([0, 0, 180])  # Lower value threshold
-        self.white_upper = np.array([180, 40, 255])  # Higher saturation threshold
+        print(f"Lane detector initialized with OpenVINO implementation")
         
         # Store previous lane detections for temporal smoothing
         self.prev_lanes = None
@@ -73,80 +73,95 @@ class LaneDetector:
     
     def detect(self, image):
         """
-        Detect lane lines in the input image.
+        Detect lane lines in the input image using OpenVINO implementation.
         
         Args:
             image: Input image as a numpy array (RGB format).
             
         Returns:
-            Dictionary containing lane information.
+            Dictionary containing lane information compatible with the original interface.
         """
-        # Use both segmentation-based and traditional computer vision approaches
-        lanes_cv = self._detect_lanes_cv(image)
-        lanes_segmentation = self._detect_lanes_segmentation(image)
-        
-        # Combine the results with improved fusion logic
-        combined_lanes = self._fuse_lane_detections(lanes_cv, lanes_segmentation)
-        
-        # Apply temporal smoothing with previous detections
-        smoothed_lanes = self._apply_temporal_smoothing(combined_lanes)
-        
-        return smoothed_lanes
-    
-    def _fuse_lane_detections(self, lanes_cv, lanes_segmentation):
+        try:
+            # Get lane trajectory from OpenVINO detector
+            trajectory = self.openvino_detector.get_lane_trajectory(image)
+            
+            # Convert trajectory to the expected lane format
+            lane_info = self._convert_trajectory_to_lanes(trajectory)
+            
+            # Apply temporal smoothing
+            smoothed_lanes = self._apply_temporal_smoothing(lane_info)
+            
+            return smoothed_lanes
+            
+        except Exception as e:
+            print(f"Error in OpenVINO lane detection: {e}")
+            # Return fallback straight lane
+            return self._get_fallback_lanes()
+
+    def _convert_trajectory_to_lanes(self, trajectory):
         """
-        Fuse lane detections from multiple methods with improved logic.
+        Convert trajectory from OpenVINO detector to lane format expected by the system.
         
         Args:
-            lanes_cv: Lane information from CV approach.
-            lanes_segmentation: Lane information from segmentation approach.
+            trajectory: List of (x, y) points in vehicle coordinates
             
         Returns:
-            Combined lane information.
+            Dictionary with lane information
         """
-        combined_lanes = {'lanes': []}
+        lane_info = {
+            'lanes': [],
+            'trajectory': trajectory,
+            'center_line': trajectory
+        }
         
-        # Start with CV lanes (generally more reliable for lane markings)
-        if lanes_cv['lanes']:
-            combined_lanes['lanes'].extend(lanes_cv['lanes'])
+        # If we have a valid trajectory, create lane representations
+        if trajectory and len(trajectory) > 1:
+            # Convert trajectory points to lane format
+            lane_points = [(int(x*50 + 320), int(400 - y*10)) for x, y in trajectory[:10]]  # Simple conversion to image coordinates
             
-        # Add segmentation lanes that don't overlap with CV lanes
-        if lanes_segmentation['lanes']:
-            for seg_lane in lanes_segmentation['lanes']:
-                is_duplicate = False
-                for cv_lane in lanes_cv['lanes']:
-                    # Check if lanes are similar (simplified)
-                    if self._are_lanes_similar(seg_lane, cv_lane):
-                        is_duplicate = True
-                        break
-                
-                if not is_duplicate:
-                    # Add confidence field if not present
-                    if 'confidence' not in seg_lane:
-                        seg_lane['confidence'] = 0.7
-                    combined_lanes['lanes'].append(seg_lane)
+            lane_info['lanes'] = [{
+                'points': lane_points,
+                'confidence': 0.8,
+                'type': 'center',
+                'polynomial_coeffs': None  # Could add polynomial fitting if needed
+            }]
         
-        # Add curve fitting for improved detection of curved lanes
-        if combined_lanes['lanes']:
-            combined_lanes = self._enhance_with_curve_fitting(combined_lanes)
-            
-        return combined_lanes
+        return lane_info
+
+    def _get_fallback_lanes(self):
+        """Get fallback straight lane when detection fails."""
+        # Create a straight forward trajectory
+        trajectory = [(float(x), 0.0) for x in range(0, 30, 2)]
+        
+        return {
+            'lanes': [{
+                'points': [(320, 400), (320, 300), (320, 200)],  # Straight line in image coordinates
+                'confidence': 0.5,
+                'type': 'center',
+                'polynomial_coeffs': None
+            }],
+            'trajectory': trajectory,
+            'center_line': trajectory
+        }
     
-    def _are_lanes_similar(self, lane1, lane2):
-        """Check if two lane detections are similar and likely duplicates."""
-        # Compare endpoints of lane segments
-        if len(lane1['points']) < 2 or len(lane2['points']) < 2:
-            return False
+    def get_trajectory_points(self, image):
+        """
+        Get trajectory points for path planning.
+        
+        Args:
+            image: Input image as numpy array
             
-        p1_start, p1_end = lane1['points'][0], lane1['points'][-1]
-        p2_start, p2_end = lane2['points'][0], lane2['points'][-1]
-        
-        # Calculate distances between endpoints
-        start_dist = np.sqrt((p1_start[0] - p2_start[0])**2 + (p1_start[1] - p2_start[1])**2)
-        end_dist = np.sqrt((p1_end[0] - p2_end[0])**2 + (p1_end[1] - p2_end[1])**2)
-        
-        # Check if both start and end points are close
-        return start_dist < 50 and end_dist < 50
+        Returns:
+            List of (x, y) trajectory points in vehicle coordinates
+        """
+        try:
+            # Use OpenVINO detector to get trajectory
+            trajectory = self.openvino_detector.get_lane_trajectory(image)
+            return trajectory
+        except Exception as e:
+            print(f"Error getting trajectory: {e}")
+            # Return straight fallback trajectory
+            return [(float(x), 0.0) for x in range(0, 30, 2)]
     
     def _apply_temporal_smoothing(self, current_lanes):
         """Apply temporal smoothing to reduce jitter in lane detection."""
@@ -154,33 +169,24 @@ class LaneDetector:
             self.prev_lanes = current_lanes
             return current_lanes
             
-        smoothed_lanes = {'lanes': []}
+        smoothed_lanes = current_lanes.copy()
         
-        # For each current lane, find matching previous lane and apply smoothing
-        for current_lane in current_lanes['lanes']:
-            matched = False
+        # Smooth the trajectory if available
+        if 'trajectory' in current_lanes and 'trajectory' in self.prev_lanes:
+            current_traj = current_lanes['trajectory']
+            prev_traj = self.prev_lanes['trajectory']
             
-            for prev_lane in self.prev_lanes['lanes']:
-                if self._are_lanes_similar(current_lane, prev_lane):
-                    # Apply smoothing to points
-                    smoothed_points = []
-                    for i in range(min(len(current_lane['points']), len(prev_lane['points']))):
-                        smoothed_x = current_lane['points'][i][0] * self.smoothing_factor + \
-                                    prev_lane['points'][i][0] * (1 - self.smoothing_factor)
-                        smoothed_y = current_lane['points'][i][1] * self.smoothing_factor + \
-                                    prev_lane['points'][i][1] * (1 - self.smoothing_factor)
-                        smoothed_points.append((int(smoothed_x), int(smoothed_y)))
-                    
-                    # Create smoothed lane
-                    smoothed_lane = current_lane.copy()
-                    smoothed_lane['points'] = smoothed_points
-                    smoothed_lanes['lanes'].append(smoothed_lane)
-                    matched = True
-                    break
-            
-            # If no match found, add current lane as is
-            if not matched:
-                smoothed_lanes['lanes'].append(current_lane)
+            if current_traj and prev_traj and len(current_traj) == len(prev_traj):
+                smoothed_trajectory = []
+                for i in range(len(current_traj)):
+                    smooth_x = current_traj[i][0] * self.smoothing_factor + \
+                              prev_traj[i][0] * (1 - self.smoothing_factor)
+                    smooth_y = current_traj[i][1] * self.smoothing_factor + \
+                              prev_traj[i][1] * (1 - self.smoothing_factor)
+                    smoothed_trajectory.append((smooth_x, smooth_y))
+                
+                smoothed_lanes['trajectory'] = smoothed_trajectory
+                smoothed_lanes['center_line'] = smoothed_trajectory
                 
         # Save current smoothed result for next iteration
         self.prev_lanes = smoothed_lanes

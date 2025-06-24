@@ -14,8 +14,9 @@
             "device": "cuda"
         },
         "lane_detection": {
-            "model": "deeplabv3_resnet50",
-            "device": "cuda"
+            "model": "openvino",
+            "device": "cpu",
+            "openvino_model_path": "../self-driving-carla-main/converted_model/lane_model.xml"
         }
     },
     "prediction": {
@@ -38,15 +39,18 @@
     },
     "control": {
         "lateral": {
-            "Kp": 1.5,
+            "Kp": 1.0,
             "Ki": 0.0,
-            "Kd": 0.0
+            "Kd": 0.05
         },
         "longitudinal": {
-            "Kp": 1.0,
-            "Ki": 0.1,
-            "Kd": 0.0
-        }
+            "Kp": 0.7,
+            "Ki": 0.05,
+            "Kd": 0.02
+        },
+        "lookahead_factor": 0.4,
+        "max_steering_angle": 0.5,
+        "max_acceleration": 1.5
     },
     "explainability": {
         "local": {

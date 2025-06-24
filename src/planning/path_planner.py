@@ -48,21 +48,128 @@ class PathPlanner:
         ego_velocity = ego_vehicle.get_velocity()
         ego_speed = 3.6 * math.sqrt(ego_velocity.x**2 + ego_velocity.y**2 + ego_velocity.z**2)  # km/h
         
-        # Extract lane information for planning
-        lanes = self._get_lanes_for_planning(lane_info)
-        
-        # Determine target lane based on behavior
-        target_lane = self._get_target_lane(behavior_command, lanes)
-        
-        # Generate trajectory based on the planning method
-        if self.method == 'frenet':
-            trajectory = self._plan_frenet(behavior_command, target_lane, ego_location, 
-                                          ego_transform, ego_speed, detected_objects, 
-                                          predicted_trajectories)
+        # Check if we have trajectory from OpenVINO lane detector
+        if lane_info and 'trajectory' in lane_info and lane_info['trajectory']:
+            trajectory = self._plan_with_trajectory(behavior_command, lane_info['trajectory'], 
+                                                   ego_location, ego_transform, ego_speed, 
+                                                   detected_objects, predicted_trajectories)
         else:
-            raise ValueError(f"Unknown planning method: {self.method}")
+            # Fall back to original planning method
+            # Extract lane information for planning
+            lanes = self._get_lanes_for_planning(lane_info)
+            
+            # Determine target lane based on behavior
+            target_lane = self._get_target_lane(behavior_command, lanes)
+            
+            # Generate trajectory based on the planning method
+            if self.method == 'frenet':
+                trajectory = self._plan_frenet(behavior_command, target_lane, ego_location, 
+                                              ego_transform, ego_speed, detected_objects, 
+                                              predicted_trajectories)
+            else:
+                raise ValueError(f"Unknown planning method: {self.method}")
         
         return trajectory
+    
+    def _plan_with_trajectory(self, behavior_command, base_trajectory, ego_location, 
+                             ego_transform, ego_speed, detected_objects, predicted_trajectories):
+        """
+        Plan trajectory using the trajectory from OpenVINO lane detector.
+        
+        Args:
+            behavior_command: Behavior command
+            base_trajectory: Trajectory from lane detector [(x, y), ...]
+            ego_location: Vehicle location
+            ego_transform: Vehicle transform
+            ego_speed: Current speed
+            detected_objects: Detected objects
+            predicted_trajectories: Predicted trajectories
+            
+        Returns:
+            Planned trajectory dictionary
+        """
+        # Convert relative trajectory to world coordinates
+        world_points = []
+        forward_vector = ego_transform.get_forward_vector()
+        right_vector = ego_transform.get_right_vector()
+        
+        for x, y in base_trajectory:
+            # Convert from vehicle coordinates to world coordinates
+            world_x = ego_location.x + x * forward_vector.x + y * right_vector.x
+            world_y = ego_location.y + x * forward_vector.y + y * right_vector.y
+            world_points.append((world_x, world_y))
+        
+        # Ensure we have enough points, interpolate if needed
+        if len(world_points) < 10:
+            # Add more points by interpolation
+            if len(world_points) >= 2:
+                # Linear interpolation to get more points
+                import numpy as np
+                x_vals = [p[0] for p in world_points]
+                y_vals = [p[1] for p in world_points]
+                
+                # Create more interpolated points
+                t_original = np.linspace(0, 1, len(world_points))
+                t_new = np.linspace(0, 1, 15)  # Get 15 points
+                
+                x_interp = np.interp(t_new, t_original, x_vals)
+                y_interp = np.interp(t_new, t_original, y_vals)
+                
+                world_points = [(x, y) for x, y in zip(x_interp, y_interp)]
+        
+        # Calculate curvature for speed adaptation
+        curvature = self._calculate_trajectory_curvature(world_points)
+        
+        # Create speed profile based on curvature and behavior
+        speed_profile = []
+        base_speed = min(ego_speed, 50.0)  # Maximum 50 km/h (about 14 m/s)
+        
+        for i, point in enumerate(world_points):
+            # Reduce speed for high curvature
+            if curvature > 0.05:  # High curvature
+                target_speed = max(base_speed * 0.6, 20.0)  # Minimum 20 km/h
+            elif curvature > 0.02:  # Medium curvature
+                target_speed = base_speed * 0.8
+            else:
+                target_speed = base_speed
+                
+            # Handle emergency behaviors
+            if behavior_command in [BehaviorState.EMERGENCY_STOP, BehaviorState.STOP_FOR_TRAFFIC_LIGHT]:
+                # Gradual deceleration
+                target_speed = max(0, base_speed * (1 - i / len(world_points)))
+            elif behavior_command == BehaviorState.FOLLOW_VEHICLE:
+                # More conservative speed
+                target_speed = min(target_speed, base_speed * 0.7)
+                
+            speed_profile.append(target_speed)
+        
+        return {
+            'points': world_points,
+            'speed_profile': speed_profile,
+            'behavior': behavior_command,
+            'curvature': curvature
+        }
+    
+    def _calculate_trajectory_curvature(self, points):
+        """Calculate maximum curvature of trajectory."""
+        if len(points) < 3:
+            return 0.0
+            
+        import numpy as np
+        points_array = np.array(points)
+        x, y = points_array[:, 0], points_array[:, 1]
+        
+        # Calculate derivatives
+        dx = np.gradient(x)
+        dy = np.gradient(y)
+        ddx = np.gradient(dx)
+        ddy = np.gradient(dy)
+        
+        # Calculate curvature
+        curvature = np.abs(dx * ddy - dy * ddx) / np.power(dx**2 + dy**2, 1.5)
+        curvature = np.nan_to_num(curvature)  # Handle NaN values
+        
+        return np.max(curvature)
     
     def _get_lanes_for_planning(self, lane_info):
         """Extract lane information for planning."""
