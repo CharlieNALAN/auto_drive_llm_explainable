@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
-Simple Working Version - Complete Migration from Successful Project
-Based on self-driving-carla-main/carla_sim.py with LLM explanations
+Simple Working Version with YOLO Object Detection
+Based on self-driving-carla-main/carla_sim.py with LLM explanations and YOLO detection
 """
 
 import carla
@@ -13,6 +13,17 @@ import argparse
 import logging
 import queue
 import re
+import sys
+import os
+
+# Add the src directory to the path for imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.join(current_dir, 'src')
+sys.path.append(src_dir)
+
+# Import YOLO object detector and traffic light detector
+from perception.object_detection import ObjectDetector
+from perception.traffic_light_detector import TrafficLightDetector
 
 # === CORE UTILITY FUNCTIONS ===
 def carla_vec_to_np_array(vec):
@@ -45,6 +56,58 @@ def send_control(vehicle, throttle, steer, brake, hand_brake=False, reverse=Fals
     brake = np.clip(brake, 0.0, 1.0)
     control = carla.VehicleControl(throttle, steer, brake, hand_brake, reverse)
     vehicle.apply_control(control)
+
+# === YOLO CLASS NAMES ===
+YOLO_CLASSES = [
+    'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
+    'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
+    'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
+    'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard',
+    'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+    'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
+    'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',
+    'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear',
+    'hair drier', 'toothbrush'
+]
+
+def draw_detections(image, detections, traffic_light_detector=None):
+    """Draw bounding boxes and labels on the image."""
+    for detection in detections:
+        x1, y1, x2, y2 = detection['bbox']
+        confidence = detection['confidence']
+        class_id = detection['class_id']
+        
+        # Get class name
+        class_name = YOLO_CLASSES[class_id] if class_id < len(YOLO_CLASSES) else f"Class {class_id}"
+        
+        # Special handling for traffic lights
+        if class_id == 9 and 'traffic_light_state' in detection:  # Traffic light
+            state = detection['traffic_light_state']
+            state_confidence = detection.get('state_confidence', 0.0)
+            
+            # Get color for traffic light state
+            if traffic_light_detector:
+                bbox_color = traffic_light_detector.get_traffic_light_color_for_visualization(state)
+            else:
+                bbox_color = (0, 255, 0)  # Default green
+            
+            # Draw bounding box with state color
+            cv2.rectangle(image, (x1, y1), (x2, y2), bbox_color, 3)
+            
+            # Enhanced label for traffic lights
+            label = f"{class_name} ({state}): {confidence:.2f}"
+        else:
+            # Regular detection
+            bbox_color = (0, 255, 0)  # Green for regular objects
+            cv2.rectangle(image, (x1, y1), (x2, y2), bbox_color, 2)
+            label = f"{class_name}: {confidence:.2f}"
+        
+        # Draw label
+        label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+        cv2.rectangle(image, (x1, y1 - label_size[1] - 10), (x1 + label_size[0], y1), bbox_color, -1)
+        cv2.putText(image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    
+    return image
 
 # === SYNCHRONOUS MODE ===
 class CarlaSyncMode(object):
@@ -193,18 +256,55 @@ def get_trajectory_from_map(CARLA_map, vehicle):
 
 # === SIMPLE LLM EXPLAINER ===
 class SimpleLLMExplainer:
-    def explain(self, speed, steer, curvature):
+    def explain(self, speed, steer, curvature, detections=None):
+        # Basic driving behavior
         if abs(steer) > 0.1:
             direction = "right" if steer > 0 else "left"
-            return f"Turning {direction} at {speed:.1f} km/h (curvature: {curvature:.4f})"
+            base_explanation = f"Turning {direction} at {speed:.1f} km/h (curvature: {curvature:.4f})"
         else:
-            return f"Driving straight at {speed:.1f} km/h"
+            base_explanation = f"Driving straight at {speed:.1f} km/h"
+        
+        # Add object detection information
+        if detections and len(detections) > 0:
+            # Get the most relevant objects (cars, persons, traffic lights, etc.)
+            relevant_objects = []
+            traffic_light_info = []
+            
+            for detection in detections:
+                class_id = detection['class_id']
+                if class_id < len(YOLO_CLASSES):
+                    class_name = YOLO_CLASSES[class_id]
+                    confidence = detection['confidence']
+                    
+                    # Special handling for traffic lights
+                    if class_name == 'traffic light' and 'traffic_light_state' in detection:
+                        state = detection['traffic_light_state']
+                        if state != 'unknown':
+                            traffic_light_info.append(f"{state} light")
+                    # Focus on other traffic-relevant objects
+                    elif class_name in ['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'person', 'stop sign']:
+                        relevant_objects.append(f"{class_name} ({confidence:.2f})")
+            
+            # Build explanation parts
+            explanation_parts = [base_explanation]
+            
+            if traffic_light_info:
+                explanation_parts.append(f"Traffic lights: {', '.join(traffic_light_info)}")
+            
+            if relevant_objects:
+                objects_str = ", ".join(relevant_objects[:3])  # Limit to top 3 objects
+                explanation_parts.append(f"Detected: {objects_str}")
+            
+            return ". ".join(explanation_parts)
+        
+        return base_explanation
 
 # === MAIN FUNCTION ===
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--fps', type=int, default=20)
     parser.add_argument('--no-llm', action='store_true')
+    parser.add_argument('--no-yolo', action='store_true', help='Disable YOLO object detection')
     args = parser.parse_args()
     
     logging.basicConfig(level=logging.INFO)
@@ -212,6 +312,26 @@ def main():
     
     # Initialize components
     explainer = None if args.no_llm else SimpleLLMExplainer()
+    
+    # Initialize YOLO object detector
+    object_detector = None
+    traffic_light_detector = None
+    if not args.no_yolo:
+        try:
+            yolo_config = {
+                'model': 'yolov8n.pt',  # Use the model file in the project root
+                'device': 'cuda',
+                'confidence': 0.5,
+                'classes': None  # Detect all classes
+            }
+            object_detector = ObjectDetector(yolo_config)
+            traffic_light_detector = TrafficLightDetector()
+            logger.info("YOLO object detector and traffic light detector initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to initialize YOLO detector: {e}")
+            object_detector = None
+            traffic_light_detector = None
+    
     pygame.init()
     
     # Connect to CARLA
@@ -247,6 +367,33 @@ def main():
                 # Get sensor data
                 snapshot, image = sync_mode.tick(timeout=2.0)
                 
+                # Convert image for processing
+                img_array = carla_img_to_array(image)
+                
+                # Object detection
+                detections = []
+                if object_detector:
+                    try:
+                        detections = object_detector.detect(img_array)
+                        
+                        # Analyze traffic lights for color detection
+                        if traffic_light_detector and detections:
+                            traffic_lights = traffic_light_detector.analyze_traffic_lights(img_array, detections)
+                            
+                            # Update detections with traffic light state information
+                            for i, detection in enumerate(detections):
+                                if detection.get('class_id') == 9:  # Traffic light
+                                    for tl in traffic_lights:
+                                        if tl['id'] == detection['id']:
+                                            detections[i].update({
+                                                'traffic_light_state': tl['traffic_light_state'],
+                                                'state_confidence': tl['state_confidence'],
+                                                'color_scores': tl.get('color_scores', {})
+                                            })
+                                            break
+                    except Exception as e:
+                        logger.warning(f"YOLO detection failed: {e}")
+                
                 # Get trajectory from map
                 trajectory = get_trajectory_from_map(world.get_map(), vehicle)
                 
@@ -274,19 +421,41 @@ def main():
                 
                 # LLM explanation
                 if explainer and len(cross_track_list) % 30 == 0:
-                    explanation = explainer.explain(speed * 3.6, steer, max_curvature)
+                    explanation = explainer.explain(speed * 3.6, steer, max_curvature, detections)
                     logger.info(f"LLM: {explanation}")
                 
                 # Cross track error
                 dist = dist_point_linestring(np.array([0,0]), trajectory)
                 cross_track_list.append(int(dist))
                 
-                # Simple visualization
-                img_array = carla_img_to_array(image)
-                img = cv2.resize(img_array, (600, 400))
-                cv2.putText(img, f"Speed: {speed*3.6:.1f} km/h", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-                cv2.putText(img, f"Steer: {'R' if steer>0 else 'L'}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-                cv2.imshow('Autonomous Driving', img)
+                # Visualization with object detection
+                img = cv2.resize(img_array, (800, 600))
+                
+                # Draw object detections
+                if detections:
+                    # Scale detection coordinates to resized image
+                    scale_x = 800 / img_array.shape[1]
+                    scale_y = 600 / img_array.shape[0]
+                    
+                    scaled_detections = []
+                    for det in detections:
+                        scaled_det = det.copy()
+                        x1, y1, x2, y2 = det['bbox']
+                        scaled_bbox = [
+                            int(x1 * scale_x), int(y1 * scale_y),
+                            int(x2 * scale_x), int(y2 * scale_y)
+                        ]
+                        scaled_det['bbox'] = scaled_bbox
+                        scaled_detections.append(scaled_det)
+                    
+                    img = draw_detections(img, scaled_detections, traffic_light_detector)
+                
+                # Add driving information
+                cv2.putText(img, f"Speed: {speed*3.6:.1f} km/h", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+                cv2.putText(img, f"Steer: {'R' if steer>0 else 'L'}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+                cv2.putText(img, f"Objects: {len(detections)}", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+                
+                cv2.imshow('Autonomous Driving with YOLO', img)
                 cv2.waitKey(1)
     
     except Exception as e:

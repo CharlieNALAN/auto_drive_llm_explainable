@@ -84,15 +84,15 @@ class LaneDetector:
         try:
             # Get lane trajectory from OpenVINO detector
             trajectory = self.openvino_detector.get_lane_trajectory(image)
-            
+        
             # Convert trajectory to the expected lane format
             lane_info = self._convert_trajectory_to_lanes(trajectory)
-            
+        
             # Apply temporal smoothing
             smoothed_lanes = self._apply_temporal_smoothing(lane_info)
-            
-            return smoothed_lanes
-            
+        
+        return smoothed_lanes
+    
         except Exception as e:
             print(f"Error in OpenVINO lane detection: {e}")
             # Return fallback straight lane

@@ -23,6 +23,28 @@ import os
 # Add current directory to path to import local modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# Import object detection and traffic light detection
+try:
+    from src.perception.object_detection import ObjectDetector
+    from src.perception.traffic_light_detector import TrafficLightDetector
+    YOLO_AVAILABLE = True
+except ImportError as e:
+    print(f"YOLO not available: {e}")
+    YOLO_AVAILABLE = False
+
+# YOLO class names
+YOLO_CLASSES = [
+    'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
+    'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
+    'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
+    'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard',
+    'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+    'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
+    'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',
+    'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear',
+    'hair drier', 'toothbrush'
+]
+
 def carla_vec_to_np_array(vec):
     return np.array([vec.x, vec.y, vec.z])
 
@@ -67,7 +89,7 @@ def create_carla_world(pygame_module, mapid):
     clock = pygame_module.time.Clock()
     client = carla.Client('localhost', 2000)
     client.set_timeout(40.0)
-    client.load_world('Town0' + mapid)
+    # client.load_world('Town0' + mapid)
     world = client.get_world()
     return display, font, clock, world
 
@@ -86,6 +108,40 @@ def find_weather_presets():
     name = lambda x: ' '.join(m.group(0) for m in rgx.finditer(x))
     presets = [x for x in dir(carla.WeatherParameters) if re.match('[A-Z].+', x)]
     return [(getattr(carla.WeatherParameters, x), name(x)) for x in presets]
+
+def draw_detections_opencv(img, detections):
+    """Draw detection boxes on OpenCV image"""
+    for detection in detections:
+        x1, y1, x2, y2 = detection['bbox']
+        class_id = detection.get('class_id', 0)
+        confidence = detection.get('confidence', 0.0)
+        class_name = YOLO_CLASSES[class_id] if class_id < len(YOLO_CLASSES) else f"Class {class_id}"
+        
+        # Choose color based on object type
+        if class_id == 9 and 'traffic_light_state' in detection:  # Traffic light
+            state = detection['traffic_light_state']
+            if state == 'red':
+                color = (0, 0, 255)  # Red in BGR
+            elif state == 'green':
+                color = (0, 255, 0)  # Green in BGR
+            elif state == 'yellow':
+                color = (0, 255, 255)  # Yellow in BGR
+            else:
+                color = (255, 255, 255)  # White
+            label = f"Traffic Light ({state})"
+        else:
+            color = (255, 0, 0)  # Blue in BGR for other objects
+            label = f"{class_name}: {confidence:.2f}"
+        
+        # Draw bounding box
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+        
+        # Draw label
+        label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+        cv2.rectangle(img, (x1, y1 - label_size[1] - 10), (x1 + label_size[0], y1), color, -1)
+        cv2.putText(img, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    
+    return img
 
 class CarlaSyncMode(object):
     def __init__(self, world, *sensors, **kwargs):
@@ -333,10 +389,23 @@ def get_trajectory_from_lane_detector(lane_detector, image):
     image_arr = carla_img_to_array(image)
     poly_left, poly_right, img_left, img_right = lane_detector(image_arr)
     
-    img = img_left + img_right
-    img = cv2.normalize(img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
-    img = img.astype(np.uint8)
+    # Get original image, convert RGB to BGR, and resize it
+    img = cv2.cvtColor(image_arr, cv2.COLOR_RGB2BGR)
     img = cv2.resize(img, (600, 400))
+    
+    # Get lane detection results and overlay them on the original image
+    lane_img = img_left + img_right
+    lane_img = cv2.normalize(lane_img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+    lane_img = lane_img.astype(np.uint8)
+    lane_img_resized = cv2.resize(lane_img, (600, 400))
+    
+    # Convert lane detection to 3-channel for overlay
+    lane_img_colored = cv2.cvtColor(lane_img_resized, cv2.COLOR_GRAY2BGR)
+    
+    # Create overlay: original image + lane lines
+    # Make lane lines more visible by using green color
+    lane_mask = lane_img_resized > 50  # Threshold for lane pixels
+    img[lane_mask] = [0, 255, 0]  # Green color for lane lines (BGR format)
     
     x = np.arange(-2, 60, 1.0)
     y = -0.5*(poly_left(x)+poly_right(x))
@@ -376,20 +445,62 @@ class LLMExplainer:
         self.model_type = model_type
         
     def explain(self, data):
-        vehicle_state = data.get("vehicle_state", {})
-        perception = data.get("perception", {})
+        """Generate explanation based on vehicle and perception data"""
+        vehicle_state = data.get('vehicle_state', {})
+        perception = data.get('perception', {})
+        detections = data.get('detections', [])
         
-        speed = vehicle_state.get("speed", 0)
-        steer = vehicle_state.get("control", {}).get("steer", 0)
-        curvature = perception.get("trajectory_curvature", 0)
+        speed_kmh = vehicle_state.get('speed', 0)
+        throttle = vehicle_state.get('control', {}).get('throttle', 0)
+        steer = vehicle_state.get('control', {}).get('steer', 0)
         
-        if abs(steer) > 0.1:
-            direction = "right" if steer > 0 else "left"
-            return f"Turning {direction} at {speed:.1f} km/h, road curvature: {curvature:.4f}"
+        # Basic driving description
+        if speed_kmh < 1:
+            action = "Stopped"
+        elif throttle > 0.1:
+            action = "Accelerating"
+        elif abs(steer) > 0.1:
+            if steer > 0:
+                action = "Turning right"
+            else:
+                action = "Turning left"
         else:
-            return f"Driving straight at {speed:.1f} km/h"
+            action = "Driving straight"
+        
+        explanation = f"{action} at {speed_kmh:.1f} km/h"
+        
+        # Process detections for traffic lights and other objects
+        traffic_light_info = []
+        relevant_objects = []
+        
+        for detection in detections:
+            class_id = detection.get('class_id', 0)
+            confidence = detection.get('confidence', 0.0)
+            
+            # Get class name
+            class_name = YOLO_CLASSES[class_id] if class_id < len(YOLO_CLASSES) else f"Class {class_id}"
+            
+            # Special handling for traffic lights
+            if class_name == 'traffic light' and 'traffic_light_state' in detection:
+                state = detection['traffic_light_state']
+                if state != 'unknown':
+                    traffic_light_info.append(f"{state} light")
+            # Focus on traffic-relevant objects
+            elif class_name in ['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'person', 'stop sign']:
+                relevant_objects.append(f"{class_name} ({confidence:.2f})")
+        
+        # Add traffic light information
+        if traffic_light_info:
+            explanation += f". Traffic lights: {', '.join(traffic_light_info)}"
+        
+        # Add object detection information
+        if relevant_objects:
+            objects_str = ", ".join(relevant_objects[:3])  # Limit to top 3 objects
+            explanation += f". Detected: {objects_str}"
+        
+        return explanation
 
-def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvino", enable_llm=True):
+def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvino", enable_llm=True, enable_yolo=True):
     # Set up logging
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
@@ -397,13 +508,34 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
     # Initialize LLM explainer
     explainer = LLMExplainer() if enable_llm else None
     
+    # Initialize YOLO detector and traffic light detector
+    yolo_detector = None
+    traffic_light_detector = None
+    if enable_yolo and YOLO_AVAILABLE:
+        try:
+            yolo_config = {
+                'model': 'yolov8n.pt',  # Use the model file in the project root
+                'device': 'cuda',
+                'confidence': 0.5,
+                'classes': None  # Detect all classes
+            }
+            yolo_detector = ObjectDetector(yolo_config)
+            traffic_light_detector = TrafficLightDetector()
+            logger.info("YOLO detector initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to initialize YOLO detector: {e}")
+            yolo_detector = None
+            traffic_light_detector = None
+    elif enable_yolo:
+        logger.warning("YOLO requested but not available")
+    
     actor_list = []
     pygame.init()
 
     display, font, clock, world = create_carla_world(pygame, mapid)
 
-    weather_presets = find_weather_presets()
-    world.set_weather(weather_presets[weather_idx][0])
+    # weather_presets = find_weather_presets()
+    # world.set_weather(weather_presets[weather_idx][0])
 
     controller = PurePursuitPlusPID()
     cross_track_list = []
@@ -439,8 +571,8 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
         else:
             lane_detector = None
 
-        # Windshield cam
-        cam_windshield_transform = carla.Transform(carla.Location(x=0.5, z=cg.height), carla.Rotation(pitch=-1*cg.pitch_deg))
+        # Windshield cam - adjusted pitch to + degrees to better capture traffic lights
+        cam_windshield_transform = carla.Transform(carla.Location(x=0.5, z=cg.height), carla.Rotation(pitch=0))
         bp = blueprint_library.find('sensor.camera.rgb')
         fov = cg.field_of_view_deg
         bp.set_attribute('image_size_x', str(cg.image_width))
@@ -476,8 +608,30 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
                 except:
                     trajectory = get_trajectory_from_map(CARLA_map, vehicle)
                     img_array = carla_img_to_array(image_windshield)
+                    # Convert RGB to BGR for OpenCV display
+                    img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
                     img = cv2.resize(img_array, (600, 400))
                     use_map_fallback = True
+
+                # Object detection
+                detections = []
+                if yolo_detector:
+                    try:
+                        img_array = carla_img_to_array(image_windshield)
+                        detections = yolo_detector.detect(img_array)
+                        
+                        # Simple traffic light color detection
+                        if traffic_light_detector and detections:
+                            traffic_lights = traffic_light_detector.analyze_traffic_lights(img_array, detections)
+                            for i, detection in enumerate(detections):
+                                if detection.get('class_id') == 9:  # Traffic light
+                                    for tl in traffic_lights:
+                                        if tl.get('id') == detection.get('id'):
+                                            detections[i]['traffic_light_state'] = tl.get('traffic_light_state', 'unknown')
+                                            break
+                    except Exception as e:
+                        logger.warning(f"Object detection error: {e}")
+                        detections = []
 
                 max_curvature = get_curvature(np.array(trajectory))
                 if max_curvature > 0.005 and flag == False:
@@ -521,7 +675,8 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
                             "perception": {
                                 "trajectory_curvature": max_curvature,
                                 "cross_track_error": cross_track_error
-                            }
+                            },
+                            "detections": detections
                         }
                         explanation = explainer.explain(explanation_input)
                         logger.info(f"LLM: {explanation}")
@@ -533,6 +688,27 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
                 fontScale = 0.75
                 fontColor = (255,255,255)
                 lineType = 2
+                
+                # Draw object detection results on the image
+                if detections:
+                    # Scale detection coordinates to OpenCV window size
+                    original_height, original_width = carla_img_to_array(image_windshield).shape[:2]
+                    img_height, img_width = img.shape[:2]
+                    scale_x = img_width / original_width
+                    scale_y = img_height / original_height
+                    
+                    scaled_detections = []
+                    for det in detections:
+                        scaled_det = det.copy()
+                        x1, y1, x2, y2 = det['bbox']
+                        scaled_bbox = [
+                            int(x1 * scale_x), int(y1 * scale_y),
+                            int(x2 * scale_x), int(y2 * scale_y)
+                        ]
+                        scaled_det['bbox'] = scaled_bbox
+                        scaled_detections.append(scaled_det)
+                    
+                    img = draw_detections_opencv(img, scaled_detections)
                 
                 if dist < 0.75:
                     laneMessage = "Lane Tracking: Good"
@@ -548,15 +724,17 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
 
                 cv2.putText(img, "Steering: {}".format(steerMessage), (400,90), fontText, fontScale, fontColor, lineType)
                 cv2.putText(img, "X: {:.2f}, Y: {:.2f}".format(vehicle_loc[0], vehicle_loc[1]), (20,50), fontText, 0.5, fontColor, lineType)
+                cv2.putText(img, f"Objects: {len(detections)}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, fontColor, lineType)
 
                 cv2.imshow('Lane detect', img)
                 cv2.waitKey(1)
 
                 fps_list.append(clock.get_fps())
 
-                # Draw the display pygame.
+                # Draw the pygame display (clean, no detection boxes)
                 draw_image(display, image_rgb)
                 display.blit(font.render('     FPS (real) % 5d ' % clock.get_fps(), True, (255, 255, 255)), (6, 4))
+                
                 pygame.display.flip()
 
     except Exception as e:
@@ -585,6 +763,7 @@ if __name__ == '__main__':
     parser.add_argument('--show-map', action='store_true')
     parser.add_argument('--model', default='openvino')
     parser.add_argument('--no-llm', action='store_true')
+    parser.add_argument('--no-yolo', action='store_true', help='Disable YOLO object detection')
     args = parser.parse_args()
     
-    main(args.fps, args.map, args.weather, args.show_map, args.model, not args.no_llm) 
+    main(args.fps, args.map, args.weather, args.show_map, args.model, not args.no_llm, not args.no_yolo) 
