@@ -28,14 +28,14 @@ class TrafficLightDetector:
             (np.array([170, 120, 150]), np.array([180, 255, 255]))
         ]
         
-        self.green_range = (np.array([50, 120, 150]), np.array([75, 255, 255]))  # Balanced green range
+        self.green_range = (np.array([45, 80, 120]), np.array([85, 255, 255]))  # More permissive green range
         self.yellow_range = (np.array([20, 140, 150]), np.array([32, 255, 255]))  # Narrow but not too narrow
         
-        # Minimum area for valid color detection
-        self.min_color_area = 15
+        # Minimum area for valid color detection (relaxed for green lights)
+        self.min_color_area = 8
         
-        # Brightness threshold for active lights
-        self.brightness_threshold = 170
+        # Brightness threshold for active lights (relaxed for green detection)
+        self.brightness_threshold = 140
         
     def detect_traffic_light_state(self, image: np.ndarray, bbox: List[int]) -> Dict:
         """
