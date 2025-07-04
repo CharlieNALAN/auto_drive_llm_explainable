@@ -564,7 +564,7 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
         sensors = [camera_rgb]
         
         # Lane Detector Model
-        cg = CameraGeometry()
+        cg = CameraGeometry(pitch_deg=2.5)
         
         if model_type == "openvino":
             lane_detector = OpenVINOLaneDetector()
@@ -572,7 +572,7 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
             lane_detector = None
 
         # Windshield cam - adjusted pitch to + degrees to better capture traffic lights
-        cam_windshield_transform = carla.Transform(carla.Location(x=0.5, z=cg.height), carla.Rotation(pitch=0))
+        cam_windshield_transform = carla.Transform(carla.Location(x=0.5, z=cg.height), carla.Rotation(pitch=-1*cg.pitch_deg))
         bp = blueprint_library.find('sensor.camera.rgb')
         fov = cg.field_of_view_deg
         bp.set_attribute('image_size_x', str(cg.image_width))
@@ -642,7 +642,22 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
 
                 speed = np.linalg.norm(carla_vec_to_np_array(vehicle.get_velocity()))
                 throttle, steer = controller.get_control(trajectory, speed, desired_speed=move_speed, dt=1./FPS)
-                send_control(vehicle, throttle, steer, 0)
+                
+                # Traffic light control - only consider front-facing traffic lights
+                brake = 0
+                img_width = carla_img_to_array(image_windshield).shape[1]
+                for detection in detections:
+                    if detection.get('class_id') == 9 and 'traffic_light_state' in detection:
+                        x1, y1, x2, y2 = detection['bbox']
+                        center_x = (x1 + x2) / 2
+                        # Only consider traffic lights in the front center area (middle 40% of image width)
+                        if 0.3 * img_width <= center_x <= 0.7 * img_width:
+                            state = detection['traffic_light_state']
+                            if state in ['red', 'yellow']:
+                                throttle, brake = 0, 1
+                                break
+                
+                send_control(vehicle, throttle, steer, brake)
 
                 dist = dist_point_linestring(np.array([0,0]), trajectory)
                 cross_track_error = int(dist)
@@ -662,7 +677,7 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
                 
                 if speed < 1 and flag == False:
                     logger.warning("Vehicle stopped!")
-                    break
+                    # break
 
                 # LLM Explanation
                 if explainer and len(cross_track_list) % 30 == 0:  # Every 30 frames

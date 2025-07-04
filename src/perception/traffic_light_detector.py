@@ -20,26 +20,27 @@ class TrafficLightDetector:
         """
         self.config = config or {}
         
-        # Color ranges in HSV
+        # Color ranges in HSV - balanced detection for bright bulbs
         self.red_ranges = [
-            # Red range 1 (lower hue)
-            (np.array([0, 50, 50]), np.array([10, 255, 255])),
-            # Red range 2 (upper hue)
-            (np.array([170, 50, 50]), np.array([180, 255, 255]))
+            # Red range 1 (lower hue) - moderately high saturation
+            (np.array([0, 120, 150]), np.array([10, 255, 255])),
+            # Red range 2 (upper hue) - moderately high saturation  
+            (np.array([170, 120, 150]), np.array([180, 255, 255]))
         ]
         
-        self.green_range = (np.array([40, 50, 50]), np.array([80, 255, 255]))
-        self.yellow_range = (np.array([15, 50, 50]), np.array([35, 255, 255]))
+        self.green_range = (np.array([50, 120, 150]), np.array([75, 255, 255]))  # Balanced green range
+        self.yellow_range = (np.array([20, 140, 150]), np.array([32, 255, 255]))  # Narrow but not too narrow
         
         # Minimum area for valid color detection
-        self.min_color_area = 20
+        self.min_color_area = 15
         
         # Brightness threshold for active lights
-        self.brightness_threshold = 100
+        self.brightness_threshold = 170
         
     def detect_traffic_light_state(self, image: np.ndarray, bbox: List[int]) -> Dict:
         """
         Detect the state of a traffic light in the given bounding box.
+        Focus only on the brightest spots (actual bulbs).
         
         Args:
             image: Input image (RGB format)
@@ -59,10 +60,13 @@ class TrafficLightDetector:
         # Convert to HSV for better color detection
         hsv = cv2.cvtColor(traffic_light_roi, cv2.COLOR_RGB2HSV)
         
-        # Detect each color
-        red_score = self._detect_red_light(hsv)
-        green_score = self._detect_green_light(hsv)
-        yellow_score = self._detect_yellow_light(hsv)
+        # Create brightness mask to focus only on bright areas (actual bulbs)
+        brightness_mask = hsv[:, :, 2] > 170  # Only bright pixels
+        
+        # Detect each color only in bright areas
+        red_score = self._detect_red_light(hsv, brightness_mask)
+        green_score = self._detect_green_light(hsv, brightness_mask)
+        yellow_score = self._detect_yellow_light(hsv, brightness_mask)
         
         # Determine the dominant color
         scores = {'red': red_score, 'green': green_score, 'yellow': yellow_score}
@@ -72,7 +76,7 @@ class TrafficLightDetector:
         max_score = scores[max_color]
         
         # Check if the score is significant enough
-        if max_score < 0.1:
+        if max_score < 0.15:  # Balanced threshold for confidence
             return {'state': 'unknown', 'confidence': 0.0}
         
         return {
@@ -81,28 +85,34 @@ class TrafficLightDetector:
             'scores': scores
         }
     
-    def _detect_red_light(self, hsv: np.ndarray) -> float:
-        """Detect red light in HSV image."""
+    def _detect_red_light(self, hsv: np.ndarray, brightness_mask: np.ndarray) -> float:
+        """Detect red light in HSV image, only in bright areas."""
         red_mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
         
         # Combine both red ranges
         for lower, upper in self.red_ranges:
             mask = cv2.inRange(hsv, lower, upper)
+            # Only consider pixels that are both red and bright
+            mask = cv2.bitwise_and(mask, brightness_mask.astype(np.uint8) * 255)
             red_mask = cv2.bitwise_or(red_mask, mask)
         
         return self._calculate_color_score(hsv, red_mask)
     
-    def _detect_green_light(self, hsv: np.ndarray) -> float:
-        """Detect green light in HSV image."""
+    def _detect_green_light(self, hsv: np.ndarray, brightness_mask: np.ndarray) -> float:
+        """Detect green light in HSV image, only in bright areas."""
         lower, upper = self.green_range
         green_mask = cv2.inRange(hsv, lower, upper)
+        # Only consider pixels that are both green and bright
+        green_mask = cv2.bitwise_and(green_mask, brightness_mask.astype(np.uint8) * 255)
         
         return self._calculate_color_score(hsv, green_mask)
     
-    def _detect_yellow_light(self, hsv: np.ndarray) -> float:
-        """Detect yellow light in HSV image."""
+    def _detect_yellow_light(self, hsv: np.ndarray, brightness_mask: np.ndarray) -> float:
+        """Detect yellow light in HSV image, only in bright areas."""
         lower, upper = self.yellow_range
         yellow_mask = cv2.inRange(hsv, lower, upper)
+        # Only consider pixels that are both yellow and bright
+        yellow_mask = cv2.bitwise_and(yellow_mask, brightness_mask.astype(np.uint8) * 255)
         
         return self._calculate_color_score(hsv, yellow_mask)
     
