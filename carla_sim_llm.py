@@ -444,7 +444,7 @@ def send_control(vehicle, throttle, steer, brake, hand_brake=False, reverse=Fals
     vehicle.apply_control(control)
 
 
-def main(fps_sim=20, mapid='2', weather_idx=6, showmap=False, model_type="openvino", enable_llm=True, enable_yolo=True):
+def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openvino", enable_llm=True, enable_yolo=True):
     # Set up logging
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
@@ -603,6 +603,9 @@ def main(fps_sim=20, mapid='2', weather_idx=6, showmap=False, model_type="openvi
                 # Traffic light control - only consider front-facing traffic lights
                 brake = 0
                 img_width = carla_img_to_array(image_windshield).shape[1]
+                img_height = carla_img_to_array(image_windshield).shape[0]
+                
+                # Check for traffic lights
                 for detection in detections:
                     if detection.get('class_id') == 9 and 'traffic_light_state' in detection:
                         x1, y1, x2, y2 = detection['bbox']
@@ -613,6 +616,66 @@ def main(fps_sim=20, mapid='2', weather_idx=6, showmap=False, model_type="openvi
                             if state in ['red', 'yellow']:
                                 throttle, brake = 0, 1
                                 break
+                
+                # Front obstruction detection - check for blocking objects in current lane
+                if brake == 0:  # Only check if not already braking for traffic lights
+                    # Define object types that can block the path
+                    blocking_objects = [
+                        'car', 'truck', 'bus', 'motorcycle',  # Vehicles
+                        'person', 'bicycle'  # Pedestrians and cyclists
+                    ]
+                    
+                    # Convert class IDs to names for easier checking
+                    blocking_class_ids = []
+                    for i, class_name in enumerate(YOLO_CLASSES):
+                        if class_name in blocking_objects:
+                            blocking_class_ids.append(i)
+                    
+                    for detection in detections:
+                        class_id = detection.get('class_id', 0)
+                        if class_id in blocking_class_ids:
+                            x1, y1, x2, y2 = detection['bbox']
+                            center_x = (x1 + x2) / 2
+                            center_y = (y1 + y2) / 2
+                            bbox_width = x2 - x1
+                            bbox_height = y2 - y1
+                            bbox_area = bbox_width * bbox_height
+                            
+                            # Check if object is in front center area (current lane)
+                            # Use a narrower corridor than traffic lights (middle 30% of image width)
+                            # and lower half of image (where road objects appear)
+                            lane_left = 0.35 * img_width
+                            lane_right = 0.65 * img_width
+                            horizon_line = 0.4 * img_height  # Objects above this line are far away
+                            
+                            if (lane_left <= center_x <= lane_right and 
+                                center_y > horizon_line):
+                                
+                                # Determine if object is close enough to require stopping
+                                # Larger bbox area indicates closer object
+                                min_area_for_stop = 1500  # Minimum area to trigger stopping
+                                
+                                # Additional checks for different object types
+                                class_name = YOLO_CLASSES[class_id] if class_id < len(YOLO_CLASSES) else ""
+                                confidence = detection.get('confidence', 0.0)
+                                
+                                # More sensitive detection for pedestrians
+                                if class_name == 'person' and bbox_area > 800 and confidence > 0.6:
+                                    throttle, brake = 0, 1
+                                    logger.info(f"Emergency stop: Pedestrian detected in front (area: {bbox_area:.0f})")
+                                    break
+                                
+                                # Vehicle obstruction detection
+                                elif class_name in ['car', 'truck', 'bus', 'motorcycle'] and bbox_area > min_area_for_stop:
+                                    throttle, brake = 0, 1
+                                    logger.info(f"Stop: {class_name} blocking path (area: {bbox_area:.0f})")
+                                    break
+                                
+                                # Bicycle detection
+                                elif class_name == 'bicycle' and bbox_area > 1000 and confidence > 0.5:
+                                    throttle, brake = 0, 1
+                                    logger.info(f"Stop: Bicycle in front (area: {bbox_area:.0f})")
+                                    break
                 
                 send_control(vehicle, throttle, steer, brake)
 
@@ -669,6 +732,14 @@ def main(fps_sim=20, mapid='2', weather_idx=6, showmap=False, model_type="openvi
                         traffic_lights = []
                         pedestrians = []
                         other_objects = []
+                        blocking_objects = []
+                        
+                        # Get image dimensions for lane detection
+                        img_width = carla_img_to_array(image_windshield).shape[1]
+                        img_height = carla_img_to_array(image_windshield).shape[0]
+                        lane_left = 0.35 * img_width
+                        lane_right = 0.65 * img_width
+                        horizon_line = 0.4 * img_height
                         
                         for detection in detections:
                             class_id = detection.get('class_id', 0)
@@ -689,17 +760,32 @@ def main(fps_sim=20, mapid='2', weather_idx=6, showmap=False, model_type="openvi
                                 "is_close": bbox_area > 1000  # Large objects are closer
                             }
                             
-                            if class_name == 'traffic light':
-                                obj_info["state"] = detection.get('traffic_light_state', 'unknown')
-                                traffic_lights.append(obj_info)
-                            elif class_name in ['car', 'truck', 'bus', 'motorcycle']:
-                                nearby_vehicles.append(obj_info)
-                            elif class_name in ['person', 'bicycle']:
-                                pedestrians.append(obj_info)
-                            elif class_name in ['stop sign'] or confidence > 0.8:
-                                critical_objects.append(obj_info)
-                            else:
-                                other_objects.append(obj_info)
+                            # Check if object is in front blocking zone
+                            is_blocking = False
+                            if (lane_left <= x_center <= lane_right and y_center > horizon_line):
+                                blocking_objects_list = ['car', 'truck', 'bus', 'motorcycle', 'person', 'bicycle']
+                                if class_name in blocking_objects_list:
+                                    # Check if object meets blocking criteria
+                                    if ((class_name == 'person' and bbox_area > 800 and confidence > 0.6) or
+                                        (class_name in ['car', 'truck', 'bus', 'motorcycle'] and bbox_area > 1500) or
+                                        (class_name == 'bicycle' and bbox_area > 1000 and confidence > 0.5)):
+                                        is_blocking = True
+                                        obj_info["is_blocking"] = True
+                                        obj_info["blocking_reason"] = f"Object in lane with area {bbox_area:.0f}"
+                                        blocking_objects.append(obj_info)
+                            
+                            if not is_blocking:
+                                if class_name == 'traffic light':
+                                    obj_info["state"] = detection.get('traffic_light_state', 'unknown')
+                                    traffic_lights.append(obj_info)
+                                elif class_name in ['car', 'truck', 'bus', 'motorcycle']:
+                                    nearby_vehicles.append(obj_info)
+                                elif class_name in ['person', 'bicycle']:
+                                    pedestrians.append(obj_info)
+                                elif class_name in ['stop sign'] or confidence > 0.8:
+                                    critical_objects.append(obj_info)
+                                else:
+                                    other_objects.append(obj_info)
                         
                         # Calculate trajectory information
                         trajectory_length = len(trajectory)
@@ -709,15 +795,27 @@ def main(fps_sim=20, mapid='2', weather_idx=6, showmap=False, model_type="openvi
                         # Performance metrics
                         avg_cross_track_error = np.mean(cross_track_list[-10:]) if len(cross_track_list) >= 10 else cross_track_error
                         
+                        # Determine stopping reason
+                        stopping_reason = "none"
+                        if brake > 0:
+                            if any(tl.get("state") in ['red', 'yellow'] for tl in traffic_lights):
+                                stopping_reason = "traffic_light"
+                            elif len(blocking_objects) > 0:
+                                stopping_reason = "obstruction"
+                            else:
+                                stopping_reason = "other"
+                        
                         explanation_input = {
                             "vehicle_state": {
                                 "speed_kmh": speed * 3.6,
                                 "speed_ms": speed,
                                 "target_speed": move_speed,
+                                "is_braking": brake > 0,
+                                "stopping_reason": stopping_reason,
                                 "control": {
                                     "throttle": max(0, throttle), 
                                     "steer": steer, 
-                                    "brake": max(0, -throttle),
+                                    "brake": brake,
                                     "steer_angle_deg": steer * 30  # Approximate steering angle
                                 },
                                 "acceleration": {
@@ -757,6 +855,7 @@ def main(fps_sim=20, mapid='2', weather_idx=6, showmap=False, model_type="openvi
                                 "nearby_vehicles": nearby_vehicles,
                                 "pedestrians": pedestrians,
                                 "critical_objects": critical_objects,
+                                "blocking_objects": blocking_objects,  # Objects causing vehicle to stop
                                 "other_objects": other_objects[:3]  # Limit to most confident 3
                             },
                             "environment": {
@@ -800,6 +899,20 @@ def main(fps_sim=20, mapid='2', weather_idx=6, showmap=False, model_type="openvi
                         scaled_detections.append(scaled_det)
                     
                     img = draw_detections_opencv(img, scaled_detections)
+                    
+                    # Draw lane obstruction detection zone
+                    lane_left = int(0.35 * img_width)
+                    lane_right = int(0.65 * img_width)
+                    horizon_line = int(0.4 * img_height)
+                    
+                    # Draw detection zone boundaries (semi-transparent)
+                    overlay = img.copy()
+                    cv2.rectangle(overlay, (lane_left, horizon_line), (lane_right, img_height), (0, 255, 0), 2)
+                    cv2.line(overlay, (lane_left, horizon_line), (lane_right, horizon_line), (0, 255, 0), 2)
+                    cv2.putText(overlay, "DETECTION ZONE", (lane_left + 5, horizon_line - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                    
+                    # Blend with original image
+                    img = cv2.addWeighted(img, 0.9, overlay, 0.1, 0)
                 
                 if dist < 0.75:
                     laneMessage = "Lane Tracking: Good"
@@ -816,6 +929,56 @@ def main(fps_sim=20, mapid='2', weather_idx=6, showmap=False, model_type="openvi
                 cv2.putText(img, "Steering: {}".format(steerMessage), (400,90), fontText, fontScale, fontColor, lineType)
                 cv2.putText(img, "X: {:.2f}, Y: {:.2f}".format(vehicle_loc[0], vehicle_loc[1]), (20,50), fontText, 0.5, fontColor, lineType)
                 cv2.putText(img, f"Objects: {len(detections)}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, fontColor, lineType)
+                
+                # Display obstruction status
+                if brake > 0:
+                    if any(det.get('class_id') == 9 and 'traffic_light_state' in det for det in detections):
+                        cv2.putText(img, "STOP: Traffic Light", (350, 130), fontText, 0.6, (0, 0, 255), 2)
+                    else:
+                        # Check if stopping due to obstruction
+                        blocking_objects = ['car', 'truck', 'bus', 'motorcycle', 'person', 'bicycle']
+                        blocking_class_ids = [i for i, name in enumerate(YOLO_CLASSES) if name in blocking_objects]
+                        
+                        img_width = carla_img_to_array(image_windshield).shape[1]
+                        img_height = carla_img_to_array(image_windshield).shape[0]
+                        
+                        obstruction_detected = False
+                        for detection in detections:
+                            class_id = detection.get('class_id', 0)
+                            if class_id in blocking_class_ids:
+                                x1, y1, x2, y2 = detection['bbox']
+                                center_x = (x1 + x2) / 2
+                                center_y = (y1 + y2) / 2
+                                
+                                # Scale to display coordinates
+                                original_height, original_width = carla_img_to_array(image_windshield).shape[:2]
+                                display_height, display_width = img.shape[:2]
+                                scale_x = display_width / original_width
+                                scale_y = display_height / original_height
+                                
+                                lane_left = 0.35 * img_width
+                                lane_right = 0.65 * img_width
+                                horizon_line = 0.4 * img_height
+                                
+                                if (lane_left <= center_x <= lane_right and center_y > horizon_line):
+                                    class_name = YOLO_CLASSES[class_id] if class_id < len(YOLO_CLASSES) else ""
+                                    cv2.putText(img, f"STOP: {class_name.upper()}", (350, 130), fontText, 0.6, (0, 0, 255), 2)
+                                    
+                                    # Draw warning box around the blocking object
+                                    scaled_x1 = int(x1 * scale_x)
+                                    scaled_y1 = int(y1 * scale_y)
+                                    scaled_x2 = int(x2 * scale_x)
+                                    scaled_y2 = int(y2 * scale_y)
+                                    
+                                    # Draw flashing red warning box
+                                    cv2.rectangle(img, (scaled_x1-3, scaled_y1-3), (scaled_x2+3, scaled_y2+3), (0, 0, 255), 3)
+                                    cv2.putText(img, "BLOCKING", (scaled_x1, scaled_y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                                    
+                                    obstruction_detected = True
+                                    break
+                        
+                        if not obstruction_detected:
+                            cv2.putText(img, "BRAKING", (350, 130), fontText, 0.6, (0, 165, 255), 2)
                 
                 # Display LLM processing status
                 if threaded_explainer:
@@ -885,7 +1048,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--fps', type=int, default=20)
     parser.add_argument('--map', default='1') 
-    parser.add_argument('--weather', type=int, default=0)
+    parser.add_argument('--weather', type=int, default=2)
     parser.add_argument('--show-map', action='store_true')
     parser.add_argument('--model', default='openvino')
     parser.add_argument('--no-llm', action='store_true')
