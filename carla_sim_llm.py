@@ -471,7 +471,7 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
         try:
             yolo_config = {
                 'model': 'yolov8n.pt',  # Use the model file in the project root
-                'device': 'cuda',
+                'device': 'cpu',
                 'confidence': 0.5,
                 'classes': None  # Detect all classes
             }
@@ -501,22 +501,236 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
     try:
         CARLA_map = world.get_map()
 
-        # create a vehicle
+        # ========== 清理现有的actors ==========
+        logger.info("正在清理现有的actors...")
+        actors = world.get_actors()
+        vehicles = actors.filter('*vehicle*')
+        sensors = actors.filter('*sensor*')
+        walkers = actors.filter('*walker*')
+
+        logger.info(f"找到 {len(vehicles)} 辆现有车辆")
+        logger.info(f"找到 {len(sensors)} 个现有传感器")
+        logger.info(f"找到 {len(walkers)} 个现有行人")
+
+        # 销毁所有现有的车辆、传感器和行人
+        for actor in vehicles:
+            actor.destroy()
+        for actor in sensors:
+            actor.destroy()
+        for actor in walkers:
+            actor.destroy()
+
+        logger.info("现有actors清理完成！")
+
+        # ========== 生成NPC车辆 ==========
+        logger.info("正在生成NPC车辆...")
+        vehicle_blueprints = world.get_blueprint_library().filter('*vehicle*')
+        spawn_points = CARLA_map.get_spawn_points()
+        
+        spawned_vehicles = []
+        for i in range(100):  # 生成20辆NPC车辆
+            vehicle = world.try_spawn_actor(random.choice(vehicle_blueprints), random.choice(spawn_points))
+            if vehicle is not None:
+                spawned_vehicles.append(vehicle)
+                logger.info(f"✅ NPC车辆 {i+1} 生成成功")
+
+        logger.info(f"成功生成了 {len(spawned_vehicles)} 辆NPC车辆")
+
+        # ========== 生成行人 ==========
+        logger.info("正在生成行人...")
+        walker_blueprints = world.get_blueprint_library().filter('walker.pedestrian.*')
+        walker_controller_bp = world.get_blueprint_library().find('controller.ai.walker')
+
+        logger.info(f"找到 {len(walker_blueprints)} 种行人类型")
+
+        # 设置要生成的行人数量
+        num_walkers = 50
+
+        # 生成行人的spawn点
+        walker_spawn_points = []
+        for i in range(num_walkers):
+            spawn_point = carla.Transform()
+            loc = world.get_random_location_from_navigation()
+            if loc is not None:
+                spawn_point.location = loc
+                walker_spawn_points.append(spawn_point)
+
+        logger.info(f"找到 {len(walker_spawn_points)} 个有效的行人生成位置")
+
+        # 生成行人和控制器
+        spawned_walkers = []
+        walker_controllers = []
+
+        for i, spawn_point in enumerate(walker_spawn_points):
+            # 随机选择行人类型
+            walker_bp = random.choice(walker_blueprints)
+            
+            # 设置行人属性
+            if walker_bp.has_attribute('is_invincible'):
+                walker_bp.set_attribute('is_invincible', 'false')
+            
+            # 随机设置行人的速度属性
+            if walker_bp.has_attribute('speed'):
+                speed = random.uniform(1.0, 2.5)
+                walker_bp.set_attribute('speed', str(speed))
+            
+            # 生成行人
+            walker = world.try_spawn_actor(walker_bp, spawn_point)
+            if walker is not None:
+                spawned_walkers.append(walker)
+                
+                # 为每个行人创建AI控制器
+                walker_controller = world.spawn_actor(walker_controller_bp, carla.Transform(), attach_to=walker)
+                if walker_controller is not None:
+                    walker_controllers.append(walker_controller)
+                    logger.info(f"✅ 行人 {i+1} 生成成功，位置: ({spawn_point.location.x:.1f}, {spawn_point.location.y:.1f})")
+                else:
+                    logger.info(f"❌ 行人 {i+1} 控制器生成失败")
+            else:
+                logger.info(f"❌ 行人 {i+1} 生成失败")
+
+        logger.info(f"🚶 成功生成了 {len(spawned_walkers)} 个行人")
+        logger.info(f"🎮 成功创建了 {len(walker_controllers)} 个行人AI控制器")
+
+        # 等待一帧，确保所有行人完全生成
+        world.tick()
+
+        # 启动行人AI控制器
+        logger.info("正在启动行人AI控制器...")
+        active_controllers = 0
+
+        for i, walker_controller in enumerate(walker_controllers):
+            try:
+                # 启动控制器
+                walker_controller.start()
+                
+                # 获取随机位置作为目标
+                target_location = world.get_random_location_from_navigation()
+                
+                if target_location is not None:
+                    walker_controller.go_to_location(target_location)
+                    # 设置随机行走速度 (1.0-2.5 m/s)
+                    max_speed = random.uniform(1.0, 2.5)
+                    walker_controller.set_max_speed(max_speed)
+                    active_controllers += 1
+                    logger.info(f"🎯 行人 {i+1} AI已启动，目标位置: ({target_location.x:.1f}, {target_location.y:.1f}), 速度: {max_speed:.1f} m/s")
+                else:
+                    # 如果无法获取导航位置，设置为缓慢随机行走
+                    walker_controller.set_max_speed(1.0)
+                    active_controllers += 1
+                    logger.info(f"🎯 行人 {i+1} AI已启动，缓慢随机行走")
+            except Exception as e:
+                logger.error(f"❌ 行人 {i+1} AI启动失败: {e}")
+
+        logger.info(f"🎮 成功启动了 {active_controllers} 个行人AI")
+
+        # ========== 启用Traffic Manager ==========
+        logger.info("正在启用Traffic Manager...")
+        
+        # 获取Traffic Manager实例
+        client = carla.Client('localhost', 2000)
+        traffic_manager = client.get_trafficmanager(8000)  # 使用默认端口8000
+        logger.info("Traffic Manager已连接")
+        
+        # 设置Traffic Manager为同步模式（与世界同步）
+        traffic_manager.set_synchronous_mode(True)
+        logger.info("Traffic Manager设置为同步模式")
+        
+        # 设置随机种子，保证行为一致
+        traffic_manager.set_random_device_seed(42)
+        logger.info("设置随机种子：42（行为更一致）")
+        
+        # 设置全局速度限制
+        traffic_manager.global_percentage_speed_difference(50.0)  # 全局比限速慢50%
+        logger.info("全局速度设置：比限速慢50%")
+        
+        # 设置更保守的全局驾驶行为
+        traffic_manager.set_global_distance_to_leading_vehicle(4.0)  # 全局跟车距离4米
+        logger.info("全局跟车距离：4米")
+
+        # ========== 为所有NPC车辆启用自动驾驶 ==========
+        logger.info("正在为NPC车辆启用自动驾驶...")
+        autopilot_count = 0
+        
+        for vehicle in spawned_vehicles:
+            try:
+                # 为每辆车启用autopilot
+                vehicle.set_autopilot(True, traffic_manager.get_port())
+                autopilot_count += 1
+                
+                # 为每辆车设置不同的速度，增加多样性
+                speed_difference = random.uniform(20.0, 80.0)  # 比限速慢20-80%
+                traffic_manager.vehicle_percentage_speed_difference(vehicle, speed_difference)
+                
+                # 为每辆车设置不同的跟车距离
+                distance = random.uniform(2.0, 6.0)  # 跟车距离2-6米
+                traffic_manager.distance_to_leading_vehicle(vehicle, distance)
+                
+                # 随机设置是否允许变道
+                allow_lane_change = random.choice([True, False])
+                traffic_manager.auto_lane_change(vehicle, allow_lane_change)
+                
+                logger.info(f"🚗 NPC车辆 {vehicle.id} 启用autopilot成功，速度:{speed_difference:.0f}%慢，跟车距离:{distance:.1f}m")
+                
+            except Exception as e:
+                logger.error(f"❌ 为NPC车辆 {vehicle.id} 启用autopilot失败: {e}")
+        
+        logger.info(f"✅ 成功为 {autopilot_count} 辆NPC车辆启用autopilot")
+
+        # ========== 环境信息总结 ==========
+        logger.info("🎬 完整交通环境已设置完成！")
+        logger.info("📊 环境配置:")
+        logger.info(f"   - 地图: Town0{mapid}")
+        logger.info(f"   - 天气: {weather_presets[weather_idx][1]}")
+        logger.info(f"   - NPC车辆: {len(spawned_vehicles)} 辆 (全部自动驾驶)")
+        logger.info(f"   - 行人: {len(spawned_walkers)} 个 (AI控制)")
+        logger.info(f"   - 行人控制器: {len(walker_controllers)} 个")
+        logger.info(f"   - Traffic Manager: 已启用 (同步模式)")
+        logger.info(f"   - 仿真帧率: {fps_sim} FPS")
+        logger.info(f"   - 车道检测: {model_type}")
+        logger.info(f"   - YOLO检测: {'启用' if enable_yolo else '禁用'}")
+        logger.info(f"   - LLM解释: {'启用' if enable_llm else '禁用'}")
+        logger.info("🚗 现在开始自动驾驶测试...")
+
+        # create a vehicle (Ego车辆)
         blueprint_library = world.get_blueprint_library()
         veh_bp = random.choice(blueprint_library.filter('vehicle.audi.tt'))
-        veh_bp.set_attribute('color','64,81,181')
-        spawn_point = random.choice(CARLA_map.get_spawn_points())
-
-        vehicle = world.spawn_actor(veh_bp, spawn_point)
-        actor_list.append(vehicle)
-
-        startPoint = carla_vec_to_np_array(spawn_point.location)
+        veh_bp.set_attribute('color','255,0,0')  # 设置为红色，便于识别
+        veh_bp.set_attribute('role_name', 'hero')  # 设置为Ego车辆
+        
+        # 为Ego车辆寻找一个空闲的spawn点
+        spawn_points = CARLA_map.get_spawn_points()
+        ego_vehicle = None
+        
+        for i, spawn_point in enumerate(spawn_points):
+            try:
+                ego_vehicle = world.try_spawn_actor(veh_bp, spawn_point)
+                if ego_vehicle is not None:
+                    logger.info(f"✅ Ego车辆生成成功！")
+                    logger.info(f"🚗 车辆类型: {ego_vehicle.type_id}")
+                    logger.info(f"🎯 Role Name: hero (Ego Vehicle)")
+                    logger.info(f"🔴 颜色: 红色 (便于识别)")
+                    logger.info(f"📍 使用的spawn点索引: {i}")
+                    logger.info(f"🆔 Ego车辆ID: {ego_vehicle.id}")
+                    logger.info(f"📍 Ego车辆位置: x={spawn_point.location.x:.2f}, y={spawn_point.location.y:.2f}, z={spawn_point.location.z:.2f}")
+                    break
+            except Exception as e:
+                logger.warning(f"尝试spawn点 {i} 失败: {e}")
+                continue
+        
+        if ego_vehicle is None:
+            logger.error("❌ 无法为Ego车辆找到空闲的spawn点")
+            logger.info("🧹 正在清理资源并退出...")
+            return
+        
+        actor_list.append(ego_vehicle)
+        startPoint = carla_vec_to_np_array(ego_vehicle.get_transform().location)
 
         # visualization cam (no functionality)
         camera_rgb = world.spawn_actor(
             blueprint_library.find('sensor.camera.rgb'),
             carla.Transform(carla.Location(x=-5.5, z=2.8), carla.Rotation(pitch=-15)),
-            attach_to=vehicle)
+            attach_to=ego_vehicle)
         actor_list.append(camera_rgb)
         sensors = [camera_rgb]
         
@@ -535,7 +749,7 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
         bp.set_attribute('image_size_x', str(cg.image_width))
         bp.set_attribute('image_size_y', str(cg.image_height))
         bp.set_attribute('fov', str(fov))
-        camera_windshield = world.spawn_actor(bp, cam_windshield_transform, attach_to=vehicle)
+        camera_windshield = world.spawn_actor(bp, cam_windshield_transform, attach_to=ego_vehicle)
         actor_list.append(camera_windshield)
         sensors.append(camera_windshield)
 
@@ -563,7 +777,7 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
                     else:
                         raise Exception("No lane detector")
                 except:
-                    trajectory = get_trajectory_from_map(CARLA_map, vehicle)
+                    trajectory = get_trajectory_from_map(CARLA_map, ego_vehicle)
                     img_array = carla_img_to_array(image_windshield)
                     # Convert RGB to BGR for OpenCV display
                     img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
@@ -597,7 +811,7 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
                 else:
                     move_speed = 5.56
 
-                speed = np.linalg.norm(carla_vec_to_np_array(vehicle.get_velocity()))
+                speed = np.linalg.norm(carla_vec_to_np_array(ego_vehicle.get_velocity()))
                 throttle, steer = controller.get_control(trajectory, speed, desired_speed=move_speed, dt=1./FPS)
                 
                 # Traffic light control - only consider front-facing traffic lights
@@ -677,7 +891,7 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
                                     logger.info(f"Stop: Bicycle in front (area: {bbox_area:.0f})")
                                     break
                 
-                send_control(vehicle, throttle, steer, brake)
+                send_control(ego_vehicle, throttle, steer, brake)
 
                 dist = dist_point_linestring(np.array([0,0]), trajectory)
                 cross_track_error = int(dist)
@@ -685,7 +899,7 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
                 if cross_track_error > 0:
                     cross_track_list.append(cross_track_error)
                     
-                waypoint = CARLA_map.get_waypoint(vehicle.get_transform().location)
+                waypoint = CARLA_map.get_waypoint(ego_vehicle.get_transform().location)
                 vehicle_loc = carla_vec_to_np_array(waypoint.transform.location)
 
                 if np.linalg.norm(vehicle_loc-startPoint) > 20:
@@ -703,10 +917,10 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
                 if threaded_explainer and len(cross_track_list) % 60 == 0:  # Every 60 frames (~3 seconds)
                     try:
                         # Get current vehicle transform and additional information
-                        vehicle_transform = vehicle.get_transform()
-                        vehicle_velocity = vehicle.get_velocity()
-                        vehicle_acceleration = vehicle.get_acceleration()
-                        vehicle_angular_velocity = vehicle.get_angular_velocity()
+                        vehicle_transform = ego_vehicle.get_transform()
+                        vehicle_velocity = ego_vehicle.get_velocity()
+                        vehicle_acceleration = ego_vehicle.get_acceleration()
+                        vehicle_angular_velocity = ego_vehicle.get_angular_velocity()
                         
                         # Get current waypoint information
                         current_waypoint = CARLA_map.get_waypoint(vehicle_transform.location)
@@ -1006,7 +1220,7 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
     finally:
-        logger.info('Cleaning up...')
+        logger.info('🧹 正在清理资源...')
         
         # Stop the LLM explainer thread
         if threaded_explainer:
@@ -1018,13 +1232,54 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
             else:
                 logger.info('LLM explainer thread stopped successfully')
         
+        # 停止所有行人控制器
+        if 'walker_controllers' in locals():
+            logger.info('正在停止行人控制器...')
+            for controller in walker_controllers:
+                try:
+                    controller.stop()
+                    controller.destroy()
+                except Exception as e:
+                    logger.warning(f"停止行人控制器时出错: {e}")
+            logger.info('✅ 行人控制器已停止')
+        
+        # 关闭Traffic Manager同步模式
+        if 'traffic_manager' in locals():
+            try:
+                traffic_manager.set_synchronous_mode(False)
+                logger.info('✅ Traffic Manager已恢复异步模式')
+            except Exception as e:
+                logger.warning(f"关闭Traffic Manager时出错: {e}")
+        
         # Destroy CARLA actors
-        logger.info('Destroying actors...')
+        logger.info('正在销毁所有actors...')
+        
+        # 销毁NPC车辆
+        if 'spawned_vehicles' in locals():
+            for vehicle in spawned_vehicles:
+                try:
+                    vehicle.destroy()
+                except Exception as e:
+                    logger.warning(f"销毁NPC车辆时出错: {e}")
+            logger.info(f'✅ 已销毁 {len(spawned_vehicles)} 辆NPC车辆')
+        
+        # 销毁行人
+        if 'spawned_walkers' in locals():
+            for walker in spawned_walkers:
+                try:
+                    walker.destroy()
+                except Exception as e:
+                    logger.warning(f"销毁行人时出错: {e}")
+            logger.info(f'✅ 已销毁 {len(spawned_walkers)} 个行人')
+        
+        # 销毁Ego车辆和其他actors
         for actor in actor_list:
             try:
                 actor.destroy()
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"销毁actor时出错: {e}")
+        
+        logger.info('✅ 所有actors已销毁')
         
         # Print statistics
         if cross_track_list:
@@ -1043,12 +1298,14 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
             
         cv2.destroyAllWindows()
         pygame.quit()
+        
+        logger.info('🎉 清理完成！')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--fps', type=int, default=20)
+    parser.add_argument('--fps', type=int, default=10)
     parser.add_argument('--map', default='1') 
-    parser.add_argument('--weather', type=int, default=2)
+    parser.add_argument('--weather', type=int, default=1)
     parser.add_argument('--show-map', action='store_true')
     parser.add_argument('--model', default='openvino')
     parser.add_argument('--no-llm', action='store_true')

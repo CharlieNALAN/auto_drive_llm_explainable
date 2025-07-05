@@ -1,0 +1,94 @@
+{
+    "simulation": {
+        "carla": {
+            "host": "localhost",
+            "port": 2000,
+            "timeout": 30.0,
+            "map": "Town04",
+            "weather": {
+                "cloudiness": 0.0,
+                "precipitation": 0.0,
+                "precipitation_deposits": 0.0,
+                "wind_intensity": 0.0,
+                "sun_azimuth_angle": 45.0,
+                "sun_altitude_angle": 45.0,
+                "fog_density": 0.0,
+                "fog_distance": 0.0,
+                "wetness": 0.0,
+                "scattering_intensity": 0.0
+            },
+            "settings": {
+                "synchronous_mode": true,
+                "fixed_delta_seconds": 0.01,
+                "no_rendering_mode": false,
+                "fps": 100
+            }
+        },
+        "vehicles": {
+            "npc_count": 20,
+            "ego_vehicle": {
+                "model": "vehicle.tesla.model3",
+                "role_name": "hero",
+                "color": "255,0,0",
+                "control_mode": "manual"
+            },
+            "autopilot": {
+                "global_speed_difference": 50.0,
+                "global_distance_to_leading_vehicle": 4.0,
+                "individual_speed_difference": 50.0,
+                "individual_distance_to_leading_vehicle": 4.0,
+                "auto_lane_change": false
+            }
+        },
+        "pedestrians": {
+            "count": 10,
+            "speed_range": [1.0, 2.5],
+            "is_invincible": false
+        },
+        "sensors": {
+            "camera": {
+                "type": "sensor.camera.rgb",
+                "image_size_x": 640,
+                "image_size_y": 480,
+                "fov": 70,
+                "position": {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "z": 1.5
+                },
+                "rotation": {
+                    "pitch": 0.0,
+                    "yaw": 0.0,
+                    "roll": 0.0
+                }
+            }
+        },
+        "recording": {
+            "output_dir": "out",
+            "save_interval": 100,
+            "image_format": "png"
+        },
+        "spectator": {
+            "follow_ego": true,
+            "back_distance": 5.0,
+            "height_offset": 4.0,
+            "pitch_angle": -15.0
+        },
+        "manual_control": {
+            "throttle_increment": 0.02,
+            "brake_increment": 0.04,
+            "steer_increment": 0.03,
+            "max_throttle": 0.5,
+            "max_brake": 0.8,
+            "max_steer": 0.4,
+            "throttle_decay": 0.01,
+            "brake_decay": 0.03,
+            "steer_decay": 0.02,
+            "max_speed": 8.0
+        }
+    },
+    "logging": {
+        "level": "INFO",
+        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    }
+} 
