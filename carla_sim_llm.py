@@ -15,10 +15,14 @@ import queue
 import weakref
 import time
 import re
+import threading
+from collections import deque
 
 # Import from original project structure (copy all needed functions)
 import sys
 import os
+
+from src.explainability.llm_explainer import ThreadedLLMExplainer
 
 # Add current directory to path to import local modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -27,6 +31,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
     from src.perception.object_detection import ObjectDetector
     from src.perception.traffic_light_detector import TrafficLightDetector
+    from src.explainability.llm_explainer import LLMExplainer, ThreadedLLMExplainer
     YOLO_AVAILABLE = True
 except ImportError as e:
     print(f"YOLO not available: {e}")
@@ -84,23 +89,13 @@ def get_font():
 
 def create_carla_world(pygame_module, mapid):
     pygame_module.init()
-    # Reduce pygame window size for better performance
-    display = pygame_module.display.set_mode((640, 480), pygame_module.HWSURFACE | pygame_module.DOUBLEBUF)
+    display = pygame_module.display.set_mode((800, 600), pygame_module.HWSURFACE | pygame_module.DOUBLEBUF)
     font = get_font()
     clock = pygame_module.time.Clock()
     client = carla.Client('localhost', 2000)
     client.set_timeout(40.0)
-    # client.load_world('Town0' + mapid)
+    client.load_world('Town0' + mapid)
     world = client.get_world()
-    
-    # Set world to low quality for better performance
-    settings = world.get_settings()
-    settings.no_rendering_mode = False
-    settings.synchronous_mode = False  # Will be set later in sync mode
-    # Reduce quality settings
-    settings.fixed_delta_seconds = None  # Variable timestep for better performance
-    world.apply_settings(settings)
-    
     return display, font, clock, world
 
 def draw_image(surface, image, blend=False):
@@ -373,46 +368,15 @@ class OpenVINOLaneDetector():
     def detect(self, img_array):
         if self.compiled_model_ir is None:
             raise Exception("OpenVINO model not available")
-        
-        # Preprocess image to reduce crack interference
-        img_processed = self._preprocess_image(img_array)
-        img_processed = np.expand_dims(np.transpose(img_processed, (2, 0, 1)), 0)
-        
+        img_array = np.expand_dims(np.transpose(img_array, (2, 0, 1)), 0)
         output_layer_ir = next(iter(self.compiled_model_ir.outputs))
-        model_output = self.compiled_model_ir([img_processed])[output_layer_ir]
+        model_output = self.compiled_model_ir([img_array])[output_layer_ir]
         background, left, right = model_output[0,0,:,:], model_output[0,1,:,:], model_output[0,2,:,:]
         return background, left, right
-    
-    def _preprocess_image(self, img_array):
-        """Preprocess image to reduce noise from cracks and improve lane detection"""
-        # Convert to grayscale for processing
-        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-        
-        # Apply mild Gaussian blur to reduce noise
-        blurred = cv2.GaussianBlur(gray, (3, 3), 1.0)
-        
-        # Apply mild adaptive histogram equalization to improve contrast
-        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8,8))
-        enhanced = clahe.apply(blurred)
-        
-        # Convert back to 3-channel
-        processed = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2RGB)
-        
-        return processed
 
     def fit_poly(self, probs):
-        # Apply gentle morphological operations to reduce noise from cracks
-        probs_clean = cv2.morphologyEx(probs, cv2.MORPH_OPEN, np.ones((2,2), np.uint8))
-        probs_clean = cv2.morphologyEx(probs_clean, cv2.MORPH_CLOSE, np.ones((3,3), np.uint8))
-        
-        probs_flat = np.ravel(probs_clean[self.cut_v:, :])
-        mask = probs_flat > 0.3  # Balanced threshold
-        
-        if np.sum(mask) < 30:  # More lenient minimum pixel requirement
-            # Fallback to original if too aggressive filtering
-            probs_flat = np.ravel(probs[self.cut_v:, :])
-            mask = probs_flat > 0.3
-        
+        probs_flat = np.ravel(probs[self.cut_v:, :])
+        mask = probs_flat > 0.3
         coeffs = np.polyfit(self.grid[:,0][mask], self.grid[:,1][mask], deg=3, w=probs_flat[mask])
         return np.poly1d(coeffs)
 
@@ -420,44 +384,7 @@ class OpenVINOLaneDetector():
         _, left, right = self.detect(img_array)
         left_poly = self.fit_poly(left)
         right_poly = self.fit_poly(right)
-        
-        # Validate lane detection quality (temporarily disabled for debugging)
-        # if self._validate_lane_detection(left_poly, right_poly):
-        #     return left_poly, right_poly, left, right
-        # else:
-        #     # If validation fails, use fallback (could be previous detection or map-based)
-        #     raise Exception("Lane detection quality too low, using map fallback")
-        
-        # Temporarily return without validation to show green lines
         return left_poly, right_poly, left, right
-    
-    def _validate_lane_detection(self, left_poly, right_poly):
-        """Validate lane detection to filter out false positives from cracks"""
-        try:
-            # Check lane width at different distances
-            distances = [10, 20, 30]  # Shorter distances for more reliable validation
-            widths = []
-            
-            for dist in distances:
-                left_y = left_poly(dist)
-                right_y = right_poly(dist)
-                width = abs(right_y - left_y)
-                widths.append(width)
-            
-            # More relaxed lane width range (2.0 to 8 meters)
-            valid_widths = [2.0 <= w <= 8.0 for w in widths]
-            if sum(valid_widths) < len(distances) * 0.5:  # Relaxed to 50%
-                return False
-            
-            # More relaxed width consistency (standard deviation < 2.5 meters)
-            width_std = np.std(widths)
-            if width_std > 2.5:  # More tolerant
-                return False
-            
-            return True
-            
-        except:
-            return True  # Default to True if calculation fails
 
     def __call__(self, img):
         return self.detect_and_fit(img)
@@ -467,7 +394,7 @@ def get_trajectory_from_lane_detector(lane_detector, image):
     image_arr = carla_img_to_array(image)
     poly_left, poly_right, img_left, img_right = lane_detector(image_arr)
     
-    # Get original image, convert RGB to BGR, and resize it (smaller for better performance)
+    # Get original image, convert RGB to BGR, and resize it
     img = cv2.cvtColor(image_arr, cv2.COLOR_RGB2BGR)
     img = cv2.resize(img, (600, 400))
     
@@ -516,75 +443,26 @@ def send_control(vehicle, throttle, steer, brake, hand_brake=False, reverse=Fals
     control = carla.VehicleControl(throttle, steer, brake, hand_brake, reverse)
     vehicle.apply_control(control)
 
-# Simple LLM Explainer
-class LLMExplainer:
-    def __init__(self, config=None, model_type="local"):
-        self.config = config or {}
-        self.model_type = model_type
-        
-    def explain(self, data):
-        """Generate explanation based on vehicle and perception data"""
-        vehicle_state = data.get('vehicle_state', {})
-        perception = data.get('perception', {})
-        detections = data.get('detections', [])
-        
-        speed_kmh = vehicle_state.get('speed', 0)
-        throttle = vehicle_state.get('control', {}).get('throttle', 0)
-        steer = vehicle_state.get('control', {}).get('steer', 0)
-        
-        # Basic driving description
-        if speed_kmh < 1:
-            action = "Stopped"
-        elif throttle > 0.1:
-            action = "Accelerating"
-        elif abs(steer) > 0.1:
-            if steer > 0:
-                action = "Turning right"
-            else:
-                action = "Turning left"
-        else:
-            action = "Driving straight"
-        
-        explanation = f"{action} at {speed_kmh:.1f} km/h"
-        
-        # Process detections for traffic lights and other objects
-        traffic_light_info = []
-        relevant_objects = []
-        
-        for detection in detections:
-            class_id = detection.get('class_id', 0)
-            confidence = detection.get('confidence', 0.0)
-            
-            # Get class name
-            class_name = YOLO_CLASSES[class_id] if class_id < len(YOLO_CLASSES) else f"Class {class_id}"
-            
-            # Special handling for traffic lights
-            if class_name == 'traffic light' and 'traffic_light_state' in detection:
-                state = detection['traffic_light_state']
-                if state != 'unknown':
-                    traffic_light_info.append(f"{state} light")
-            # Focus on traffic-relevant objects
-            elif class_name in ['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'person', 'stop sign']:
-                relevant_objects.append(f"{class_name} ({confidence:.2f})")
-        
-        # Add traffic light information
-        if traffic_light_info:
-            explanation += f". Traffic lights: {', '.join(traffic_light_info)}"
-        
-        # Add object detection information
-        if relevant_objects:
-            objects_str = ", ".join(relevant_objects[:3])  # Limit to top 3 objects
-            explanation += f". Detected: {objects_str}"
-        
-        return explanation
 
-def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvino", enable_llm=True, enable_yolo=True):
+def main(fps_sim=20, mapid='2', weather_idx=6, showmap=False, model_type="openvino", enable_llm=True, enable_yolo=True):
     # Set up logging
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
     
-    # Initialize LLM explainer
-    explainer = LLMExplainer() if enable_llm else None
+    # Initialize LLM explainer with Deepseek API
+    threaded_explainer = None
+    if enable_llm:
+        llm_config = {
+            'api_key': "sk-e1bbc1ee34174850a8bdf7d03cb3b67a",  # 将从环境变量 DEEPSEEK_API_KEY 获取
+            'api_base_url': 'https://api.deepseek.com/v1',
+            'api_model': 'deepseek-chat'
+        }
+        explainer = LLMExplainer(config=llm_config, model_type="deepseek_api")
+        threaded_explainer = ThreadedLLMExplainer(explainer, max_queue_size=5)
+        threaded_explainer.start()
+        logger.info(f"Threaded LLM Explainer initialized with model_type: {explainer.model_type}")
+    else:
+        threaded_explainer = None
     
     # Initialize YOLO detector and traffic light detector
     yolo_detector = None
@@ -612,8 +490,9 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
 
     display, font, clock, world = create_carla_world(pygame, mapid)
 
-    # weather_presets = find_weather_presets()
-    # world.set_weather(weather_presets[weather_idx][0])
+    weather_presets = find_weather_presets()
+    world.set_weather(weather_presets[weather_idx][0])
+    logger.info(f"Weather set to: {weather_presets[weather_idx][1]}")
 
     controller = PurePursuitPlusPID()
     cross_track_list = []
@@ -642,7 +521,7 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
         sensors = [camera_rgb]
         
         # Lane Detector Model
-        cg = CameraGeometry(pitch_deg=2.5)
+        cg = CameraGeometry(pitch_deg=5)
         
         if model_type == "openvino":
             lane_detector = OpenVINOLaneDetector()
@@ -757,24 +636,143 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
                     logger.warning("Vehicle stopped!")
                     # break
 
-                # LLM Explanation
-                if explainer and len(cross_track_list) % 30 == 0:  # Every 30 frames
+                # LLM Explanation - 每60帧调用一次（约3秒）- 非阻塞异步处理
+                if threaded_explainer and len(cross_track_list) % 60 == 0:  # Every 60 frames (~3 seconds)
                     try:
+                        # Get current vehicle transform and additional information
+                        vehicle_transform = vehicle.get_transform()
+                        vehicle_velocity = vehicle.get_velocity()
+                        vehicle_acceleration = vehicle.get_acceleration()
+                        vehicle_angular_velocity = vehicle.get_angular_velocity()
+                        
+                        # Get current waypoint information
+                        current_waypoint = CARLA_map.get_waypoint(vehicle_transform.location)
+                        
+                        # Get upcoming waypoints for context
+                        upcoming_waypoints = []
+                        temp_waypoint = current_waypoint
+                        for i in range(5):  # Get next 5 waypoints
+                            next_wps = temp_waypoint.next(5.0)  # 5 meters ahead
+                            if next_wps:
+                                temp_waypoint = next_wps[0]
+                                upcoming_waypoints.append({
+                                    "distance": i * 5.0,
+                                    "lane_change": temp_waypoint.lane_change,
+                                    "lane_type": str(temp_waypoint.lane_type),
+                                    "road_id": temp_waypoint.road_id,
+                                    "lane_id": temp_waypoint.lane_id
+                                })
+                        
+                        # Categorize detected objects by relevance
+                        critical_objects = []
+                        nearby_vehicles = []
+                        traffic_lights = []
+                        pedestrians = []
+                        other_objects = []
+                        
+                        for detection in detections:
+                            class_id = detection.get('class_id', 0)
+                            class_name = YOLO_CLASSES[class_id] if class_id < len(YOLO_CLASSES) else f"Class {class_id}"
+                            confidence = detection.get('confidence', 0.0)
+                            bbox = detection.get('bbox', [0, 0, 0, 0])
+                            
+                            # Calculate object position relative to vehicle center
+                            x_center = (bbox[0] + bbox[2]) / 2
+                            y_center = (bbox[1] + bbox[3]) / 2
+                            bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+                            
+                            obj_info = {
+                                "class": class_name,
+                                "confidence": confidence,
+                                "position": {"x": x_center, "y": y_center},
+                                "size": bbox_area,
+                                "is_close": bbox_area > 1000  # Large objects are closer
+                            }
+                            
+                            if class_name == 'traffic light':
+                                obj_info["state"] = detection.get('traffic_light_state', 'unknown')
+                                traffic_lights.append(obj_info)
+                            elif class_name in ['car', 'truck', 'bus', 'motorcycle']:
+                                nearby_vehicles.append(obj_info)
+                            elif class_name in ['person', 'bicycle']:
+                                pedestrians.append(obj_info)
+                            elif class_name in ['stop sign'] or confidence > 0.8:
+                                critical_objects.append(obj_info)
+                            else:
+                                other_objects.append(obj_info)
+                        
+                        # Calculate trajectory information
+                        trajectory_length = len(trajectory)
+                        trajectory_points_ahead = min(10, trajectory_length)
+                        lookahead_distance = np.linalg.norm(trajectory[min(5, trajectory_length-1)]) if trajectory_length > 1 else 0
+                        
+                        # Performance metrics
+                        avg_cross_track_error = np.mean(cross_track_list[-10:]) if len(cross_track_list) >= 10 else cross_track_error
+                        
                         explanation_input = {
                             "vehicle_state": {
-                                "speed": speed * 3.6,
-                                "control": {"throttle": max(0, throttle), "steer": steer, "brake": max(0, -throttle)}
+                                "speed_kmh": speed * 3.6,
+                                "speed_ms": speed,
+                                "target_speed": move_speed,
+                                "control": {
+                                    "throttle": max(0, throttle), 
+                                    "steer": steer, 
+                                    "brake": max(0, -throttle),
+                                    "steer_angle_deg": steer * 30  # Approximate steering angle
+                                },
+                                "acceleration": {
+                                    "x": vehicle_acceleration.x,
+                                    "y": vehicle_acceleration.y,
+                                    "magnitude": np.linalg.norm([vehicle_acceleration.x, vehicle_acceleration.y])
+                                },
+                                "angular_velocity": vehicle_angular_velocity.z,
+                                "position": {
+                                    "x": vehicle_transform.location.x,
+                                    "y": vehicle_transform.location.y,
+                                    "heading_deg": vehicle_transform.rotation.yaw
+                                }
+                            },
+                            "road_context": {
+                                "current_lane": {
+                                    "road_id": current_waypoint.road_id,
+                                    "lane_id": current_waypoint.lane_id,
+                                    "lane_type": str(current_waypoint.lane_type),
+                                    "lane_change": str(current_waypoint.lane_change),
+                                    "is_junction": current_waypoint.is_junction
+                                },
+                                "upcoming_waypoints": upcoming_waypoints,
+                                "navigation_mode": "lane_detection" if not use_map_fallback else "map_based"
                             },
                             "perception": {
                                 "trajectory_curvature": max_curvature,
-                                "cross_track_error": cross_track_error
+                                "trajectory_length": trajectory_length,
+                                "lookahead_distance": lookahead_distance,
+                                "cross_track_error": cross_track_error,
+                                "avg_cross_track_error": avg_cross_track_error,
+                                "lane_tracking_quality": "good" if cross_track_error < 0.75 else "poor"
                             },
-                            "detections": detections
+                            "detected_objects": {
+                                "total_count": len(detections),
+                                "traffic_lights": traffic_lights,
+                                "nearby_vehicles": nearby_vehicles,
+                                "pedestrians": pedestrians,
+                                "critical_objects": critical_objects,
+                                "other_objects": other_objects[:3]  # Limit to most confident 3
+                            },
+                            "environment": {
+                                "simulation_time": len(cross_track_list) / FPS,  # Approximate time in seconds
+                                "frame_count": len(cross_track_list),
+                                "weather": "clear"  # Could be extended with actual weather
+                            }
                         }
-                        explanation = explainer.explain(explanation_input)
-                        logger.info(f"LLM: {explanation}")
+                        
+                        # Add request to queue (non-blocking)
+                        success = threaded_explainer.add_explanation_request(explanation_input)
+                        if not success:
+                            logger.debug("LLM explanation queue full, skipping this request")
+                        
                     except Exception as e:
-                        logger.error(f"LLM error: {e}")
+                        logger.error(f"LLM preparation error: {e}")
 
                 # Visualization
                 fontText = cv2.FONT_HERSHEY_SIMPLEX
@@ -784,7 +782,7 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
                 
                 # Draw object detection results on the image
                 if detections:
-                    # Scale detection coordinates to OpenCV window size (600x400)
+                    # Scale detection coordinates to OpenCV window size
                     original_height, original_width = carla_img_to_array(image_windshield).shape[:2]
                     img_height, img_width = img.shape[:2]
                     scale_x = img_width / original_width
@@ -818,6 +816,18 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
                 cv2.putText(img, "Steering: {}".format(steerMessage), (400,90), fontText, fontScale, fontColor, lineType)
                 cv2.putText(img, "X: {:.2f}, Y: {:.2f}".format(vehicle_loc[0], vehicle_loc[1]), (20,50), fontText, 0.5, fontColor, lineType)
                 cv2.putText(img, f"Objects: {len(detections)}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, fontColor, lineType)
+                
+                # Display LLM processing status
+                if threaded_explainer:
+                    if threaded_explainer.is_processing():
+                        cv2.putText(img, "LLM: Processing...", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), lineType)
+                    else:
+                        recent_explanations = threaded_explainer.get_recent_explanations(1)
+                        if recent_explanations:
+                            last_time = recent_explanations[-1]['processing_time']
+                            cv2.putText(img, f"LLM: Ready ({last_time:.1f}s)", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), lineType)
+                        else:
+                            cv2.putText(img, "LLM: Ready", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), lineType)
 
                 cv2.imshow('Lane detect', img)
                 cv2.waitKey(1)
@@ -833,6 +843,19 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
     finally:
+        logger.info('Cleaning up...')
+        
+        # Stop the LLM explainer thread
+        if threaded_explainer:
+            logger.info('Stopping LLM explainer thread...')
+            threaded_explainer.stop()
+            threaded_explainer.join(timeout=5.0)  # Wait up to 5 seconds for thread to stop
+            if threaded_explainer.is_alive():
+                logger.warning('LLM explainer thread did not stop gracefully')
+            else:
+                logger.info('LLM explainer thread stopped successfully')
+        
+        # Destroy CARLA actors
         logger.info('Destroying actors...')
         for actor in actor_list:
             try:
@@ -840,10 +863,20 @@ def main(fps_sim=20, mapid='1', weather_idx=0, showmap=False, model_type="openvi
             except:
                 pass
         
+        # Print statistics
         if cross_track_list:
             logger.info(f'Mean cross track error: {np.mean(cross_track_list):.2f}')
         if fps_list:
             logger.info(f'Mean FPS: {np.mean(fps_list):.2f}')
+        
+        # Show LLM processing statistics
+        if threaded_explainer and threaded_explainer.recent_explanations:
+            recent_explanations = threaded_explainer.get_recent_explanations(5)
+            if recent_explanations:
+                processing_times = [exp['processing_time'] for exp in recent_explanations]
+                logger.info(f'LLM processing times - Mean: {np.mean(processing_times):.2f}s, '
+                           f'Min: {np.min(processing_times):.2f}s, Max: {np.max(processing_times):.2f}s')
+                logger.info(f'Total explanations processed: {len(threaded_explainer.recent_explanations)}')
             
         cv2.destroyAllWindows()
         pygame.quit()

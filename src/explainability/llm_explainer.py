@@ -1,341 +1,425 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import os
+import logging
+import requests
 import json
+import os
+import threading
+import queue
 import time
-from pathlib import Path
+from collections import deque
+
+# transformers 不再需要，因为我们使用 API 方式
+TRANSFORMERS_AVAILABLE = False
+
 
 class LLMExplainer:
-    """Class to generate natural language explanations for driving decisions using LLMs."""
-    
-    def __init__(self, config, model_type='local'):
-        """
-        Initialize the LLM explainer.
-        
-        Args:
-            config: Configuration dictionary for the explainer.
-            model_type: Type of LLM to use ('local', 'openai', 'anthropic').
-        """
-        self.config = config
+    def __init__(self, config=None, model_type="deepseek_api"):
+        self.config = config or {}
         self.model_type = model_type
-        self.last_explanation_time = 0
-        self.explanation_cooldown = 0.5  # seconds, to avoid generating explanations too frequently
+        self.logger = logging.getLogger(__name__)
         
-        # Initialize the model based on type
-        if model_type == 'local':
-            self._init_local_model(config.get('local', {}))
-        elif model_type == 'openai':
-            self._init_openai_model(config.get('openai', {}))
-        elif model_type == 'anthropic':
-            self._init_anthropic_model(config.get('anthropic', {}))
+        # 初始化 API 相关变量
+        self.api_key = None
+        self.api_base_url = None
+        self.api_model = None
+        
+        if model_type == "deepseek_api":
+            try:
+                self._initialize_deepseek_api()
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize Deepseek API: {e}")
+                self.logger.info("Falling back to rule-based explanation")
+                self.model_type = "fallback"
         else:
-            raise ValueError(f"Unknown model type: {model_type}")
-        
-        # Load prompt template
-        self.prompt_template = config.get('prompt_template', self._default_prompt_template())
-        
-        print(f"LLM explainer initialized with model type: {model_type}")
+            self.model_type = "fallback"
     
-    def _init_local_model(self, config):
-        """Initialize local LLM model."""
+    def _initialize_deepseek_api(self):
+        """初始化 Deepseek API 配置"""
+        # 从配置中获取 API 密钥和基础 URL
+        self.api_key = self.config.get('api_key')
+        self.api_base_url = self.config.get('api_base_url', 'https://api.deepseek.com/v1')
+        self.api_model = self.config.get('api_model', 'deepseek-chat')
+        
+        if not self.api_key:
+            # 尝试从环境变量获取
+            self.api_key = os.getenv('DEEPSEEK_API_KEY')
+            
+        if not self.api_key:
+            raise Exception("No Deepseek API key provided. Please set DEEPSEEK_API_KEY environment variable or provide api_key in config.")
+        
+        self.logger.info(f"Deepseek API initialized with model: {self.api_model}")
+        
+        # 测试 API 连接
         try:
-            from llama_cpp import Llama
-            
-            model_path = config.get('model_path', 'models/llama-2-7b-chat.gguf')
-            context_length = config.get('context_length', 2048)
-            temperature = config.get('temperature', 0.3)
-            top_p = config.get('top_p', 0.9)
-            
-            # If model path is specified but doesn't exist, print a warning
-            if not os.path.exists(model_path):
-                print(f"Warning: Local model file not found at {model_path}. Will proceed with mock inference.")
-                self._mock_model = True
-                return
-            
-            # Load model
-            self.model = Llama(
-                model_path=model_path,
-                n_ctx=context_length,
-                verbose=False
+            self._call_deepseek_api("测试连接", max_tokens=10)
+            self.logger.info("Deepseek API connection test successful")
+        except Exception as e:
+            self.logger.warning(f"Deepseek API test failed: {e}")
+            raise
+    
+    def _call_deepseek_api(self, prompt, max_tokens=150, temperature=0.7):
+        """调用 Deepseek API"""
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json'
+        }
+        
+        # 设置系统提示，确保生成简洁精确的中文驾驶解释
+        system_prompt = """你是一个自动驾驶汽车的AI解释员。请根据给定的驾驶数据生成简洁、准确、直击要点的中文解释。一句话。"""
+        
+        data = {
+            'model': self.api_model,
+            'messages': [
+                {
+                    'role': 'system',
+                    'content': system_prompt
+                },
+                {
+                    'role': 'user',
+                    'content': prompt
+                }
+            ],
+            'max_tokens': max_tokens,
+            'temperature': temperature,
+            'stream': False
+        }
+        
+        try:
+            response = requests.post(
+                f"{self.api_base_url}/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=30
             )
             
-            # Store configuration
-            self.model_config = {
-                'temperature': temperature,
-                'top_p': top_p,
-                'max_tokens': 100
-            }
-            
-            self._mock_model = False
-        except ImportError:
-            print("Warning: llama_cpp not installed. Using mock LLM responses.")
-            self._mock_model = True
-        except Exception as e:
-            print(f"Error loading local model: {e}. Using mock LLM responses.")
-            self._mock_model = True
-    
-    def _init_openai_model(self, config):
-        """Initialize OpenAI API client."""
-        try:
-            import openai
-            
-            # Check for API key
-            api_key = os.environ.get('OPENAI_API_KEY')
-            if not api_key:
-                print("Warning: OPENAI_API_KEY environment variable not set. Using mock LLM responses.")
-                self._mock_model = True
-                return
-            
-            openai.api_key = api_key
-            
-            # Store model configuration
-            self.model_config = {
-                'model': config.get('model', 'gpt-3.5-turbo'),
-                'temperature': config.get('temperature', 0.3),
-                'max_tokens': config.get('max_tokens', 100)
-            }
-            
-            self._mock_model = False
-        except ImportError:
-            print("Warning: openai package not installed. Using mock LLM responses.")
-            self._mock_model = True
-        except Exception as e:
-            print(f"Error initializing OpenAI client: {e}. Using mock LLM responses.")
-            self._mock_model = True
-    
-    def _init_anthropic_model(self, config):
-        """Initialize Anthropic API client."""
-        try:
-            import anthropic
-            
-            # Check for API key
-            api_key = os.environ.get('ANTHROPIC_API_KEY')
-            if not api_key:
-                print("Warning: ANTHROPIC_API_KEY environment variable not set. Using mock LLM responses.")
-                self._mock_model = True
-                return
-            
-            self.model = anthropic.Anthropic(api_key=api_key)
-            
-            # Store model configuration
-            self.model_config = {
-                'model': config.get('model', 'claude-3-haiku'),
-                'temperature': config.get('temperature', 0.3),
-                'max_tokens': config.get('max_tokens', 100)
-            }
-            
-            self._mock_model = False
-        except ImportError:
-            print("Warning: anthropic package not installed. Using mock LLM responses.")
-            self._mock_model = True
-        except Exception as e:
-            print(f"Error initializing Anthropic client: {e}. Using mock LLM responses.")
-            self._mock_model = True
-    
-    def _default_prompt_template(self):
-        """Return default prompt template if none is provided in config."""
-        return """You are an autonomous driving system's explainability module. Explain the vehicle's current actions in clear, concise language.
-
-Vehicle State:
-- Speed: {speed} km/h
-- Current controls: {controls}
-
-Environment:
-{environment}
-
-Planning Decision:
-{planning_decision}
-
-Based on this information, explain why the vehicle is taking its current action in 1-2 short sentences:"""
-    
+            if response.status_code == 200:
+                result = response.json()
+                return result['choices'][0]['message']['content'].strip()
+            else:
+                self.logger.error(f"API request failed with status {response.status_code}: {response.text}")
+                raise Exception(f"API request failed: {response.status_code}")
+                
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"API request error: {e}")
+            raise
+        
     def explain(self, data):
-        """
-        Generate a natural language explanation for the current driving decision.
-        
-        Args:
-            data: Dictionary containing information about the vehicle state, perception, prediction, and planning.
-            
-        Returns:
-            A natural language explanation.
-        """
-        # Rate limiting - don't generate explanations too frequently
-        current_time = time.time()
-        if current_time - self.last_explanation_time < self.explanation_cooldown:
-            return "Driving based on previous assessment."
-        
-        self.last_explanation_time = current_time
-        
-        # Format input data for the model
-        formatted_input = self._format_data(data)
-        
-        # Generate explanation
-        if self._mock_model:
-            explanation = self._mock_explanation(formatted_input)
-        elif self.model_type == 'local':
-            explanation = self._explain_local(formatted_input)
-        elif self.model_type == 'openai':
-            explanation = self._explain_openai(formatted_input)
-        elif self.model_type == 'anthropic':
-            explanation = self._explain_anthropic(formatted_input)
+        """Generate explanation based on comprehensive vehicle and perception data"""
+        if self.model_type == "deepseek_api":
+            return self._explain_with_deepseek_api(data)
         else:
-            explanation = "Driving normally."
+            return self._explain_fallback(data)
+    
+    def _explain_with_deepseek_api(self, data):
+        """使用 Deepseek API 生成驾驶解释"""
+        try:
+            prompt = self._build_prompt(data)
+            explanation = self._call_deepseek_api(prompt, max_tokens=100, temperature=0.7)
+            
+            # 如果生成的解释为空或太短，使用备用方法
+            if not explanation or len(explanation) < 5:
+                self.logger.warning("API generated explanation too short, using fallback")
+                return self._explain_fallback(data)
+            
+            return explanation
+            
+        except Exception as e:
+            self.logger.warning(f"Deepseek API generation failed: {e}")
+            return self._explain_fallback(data)
+    
+    def _build_prompt(self, data):
+        """构建给 LLM 的 prompt"""
+        vehicle_state = data.get('vehicle_state', {})
+        road_context = data.get('road_context', {})
+        perception = data.get('perception', {})
+        detected_objects = data.get('detected_objects', {})
+        
+        # 提取关键信息
+        speed_kmh = vehicle_state.get('speed_kmh', 0)
+        target_speed = vehicle_state.get('target_speed', 0)
+        control = vehicle_state.get('control', {})
+        throttle = control.get('throttle', 0)
+        steer = control.get('steer', 0)
+        brake = control.get('brake', 0)
+        
+        current_lane = road_context.get('current_lane', {})
+        is_junction = current_lane.get('is_junction', False)
+        navigation_mode = road_context.get('navigation_mode', 'unknown')
+        
+        trajectory_curvature = perception.get('trajectory_curvature', 0)
+        cross_track_error = perception.get('cross_track_error', 0)
+        lane_tracking_quality = perception.get('lane_tracking_quality', 'unknown')
+        
+        # 检测到的物体信息
+        traffic_lights = detected_objects.get('traffic_lights', [])
+        nearby_vehicles = detected_objects.get('nearby_vehicles', [])
+        pedestrians = detected_objects.get('pedestrians', [])
+        critical_objects = detected_objects.get('critical_objects', [])
+        
+        prompt = f"""你是一个自动驾驶汽车的解释系统，请根据以下信息生成简洁的中文驾驶行为解释：
+
+车辆状态：
+- 当前速度：{speed_kmh:.1f} km/h
+- 目标速度：{target_speed:.1f} km/h
+- 油门：{throttle:.2f}，转向：{steer:.2f}，制动：{brake:.2f}
+
+道路环境：
+- 车道跟踪质量：{lane_tracking_quality}
+- 横向偏差：{cross_track_error:.2f}m
+- 轨迹曲率：{trajectory_curvature:.4f}
+- 是否在交叉口：{"是" if is_junction else "否"}
+- 导航模式：{navigation_mode}
+
+检测到的物体：
+- 交通灯：{len(traffic_lights)}个
+- 附近车辆：{len(nearby_vehicles)}辆
+- 行人：{len(pedestrians)}名
+- 关键物体：{len(critical_objects)}个
+
+请生成一句话的驾驶行为解释，描述当前在做什么以及原因。回复要简洁、准确、符合中文表达习惯。"""
+
+        return prompt
+    
+    def _explain_fallback(self, data):
+        """备用的基于规则的解释方法"""
+        vehicle_state = data.get('vehicle_state', {})
+        road_context = data.get('road_context', {})
+        perception = data.get('perception', {})
+        detected_objects = data.get('detected_objects', {})
+        
+        # Extract vehicle information
+        speed_kmh = vehicle_state.get('speed_kmh', 0)
+        target_speed = vehicle_state.get('target_speed', 0)
+        control = vehicle_state.get('control', {})
+        throttle = control.get('throttle', 0)
+        steer = control.get('steer', 0)
+        brake = control.get('brake', 0)
+        
+        # Extract road context
+        current_lane = road_context.get('current_lane', {})
+        navigation_mode = road_context.get('navigation_mode', 'unknown')
+        upcoming_waypoints = road_context.get('upcoming_waypoints', [])
+        
+        # Extract perception information
+        trajectory_curvature = perception.get('trajectory_curvature', 0)
+        cross_track_error = perception.get('cross_track_error', 0)
+        lane_tracking_quality = perception.get('lane_tracking_quality', 'unknown')
+        
+        # Basic driving action description
+        if speed_kmh < 1:
+            if brake > 0.1:
+                action = "制动停车"
+            else:
+                action = "静止"
+        elif brake > 0.1:
+            action = "制动减速"
+        elif throttle > 0.1:
+            if speed_kmh < target_speed - 1:
+                action = "加速中"
+            else:
+                action = "维持速度"
+        elif abs(steer) > 0.1:
+            if trajectory_curvature > 0.01:
+                direction = "右转" if steer > 0 else "左转"
+                action = f"过弯{direction}"
+            else:
+                direction = "右转" if steer > 0 else "左转"
+                action = f"轻微{direction}"
+        else:
+            action = "直行"
+        
+        # Speed information
+        if abs(speed_kmh - target_speed) > 2:
+            speed_status = f"当前{speed_kmh:.1f}km/h，目标{target_speed:.1f}km/h"
+        else:
+            speed_status = f"{speed_kmh:.1f}km/h"
+        
+        explanation = f"{action}，{speed_status}"
+        
+        # Lane tracking quality
+        if lane_tracking_quality == "good":
+            explanation += "，车道保持良好"
+        elif lane_tracking_quality == "poor":
+            explanation += f"，车道偏差{cross_track_error:.1f}m"
+        
+        # Road context information
+        if current_lane.get('is_junction'):
+            explanation += "，正在通过交叉口"
+        elif trajectory_curvature > 0.01:
+            explanation += "，正在过弯"
+        
+        # Navigation mode
+        if navigation_mode == "map_based":
+            explanation += "（地图导航）"
+        
+        # Process detected objects by category
+        traffic_light_info = []
+        vehicle_info = []
+        pedestrian_info = []
+        critical_info = []
+        
+        # Traffic lights
+        for tl in detected_objects.get('traffic_lights', []):
+            state = tl.get('state', 'unknown')
+            if state != 'unknown':
+                if tl.get('is_close', False):
+                    traffic_light_info.append(f"前方{state}灯")
+                else:
+                    traffic_light_info.append(f"远处{state}灯")
+        
+        # Nearby vehicles
+        close_vehicles = [v for v in detected_objects.get('nearby_vehicles', []) if v.get('is_close', False)]
+        if close_vehicles:
+            vehicle_types = {}
+            for v in close_vehicles:
+                vtype = v.get('class', 'vehicle')
+                if vtype == 'car':
+                    vtype = '汽车'
+                elif vtype == 'truck':
+                    vtype = '卡车'
+                elif vtype == 'bus':
+                    vtype = '公交车'
+                elif vtype == 'motorcycle':
+                    vtype = '摩托车'
+                vehicle_types[vtype] = vehicle_types.get(vtype, 0) + 1
+            
+            for vtype, count in vehicle_types.items():
+                if count == 1:
+                    vehicle_info.append(f"前方{vtype}")
+                else:
+                    vehicle_info.append(f"前方{count}辆{vtype}")
+        
+        # Pedestrians
+        close_pedestrians = [p for p in detected_objects.get('pedestrians', []) if p.get('is_close', False)]
+        if close_pedestrians:
+            pedestrian_count = len(close_pedestrians)
+            if pedestrian_count == 1:
+                pedestrian_info.append("前方行人")
+            else:
+                pedestrian_info.append(f"前方{pedestrian_count}名行人")
+        
+        # Critical objects
+        for obj in detected_objects.get('critical_objects', []):
+            obj_class = obj.get('class', 'object')
+            if obj_class == 'stop sign':
+                critical_info.append("停止标志")
+            else:
+                critical_info.append(obj_class)
+        
+        # Combine object detection information
+        all_objects = []
+        if traffic_light_info:
+            all_objects.extend(traffic_light_info)
+        if critical_info:
+            all_objects.extend(critical_info)
+        if vehicle_info:
+            all_objects.extend(vehicle_info)
+        if pedestrian_info:
+            all_objects.extend(pedestrian_info)
+        
+        if all_objects:
+            explanation += f"。检测到：{', '.join(all_objects)}"
+        
+        # Upcoming road information
+        if upcoming_waypoints:
+            next_wp = upcoming_waypoints[0]
+            if next_wp.get('lane_change') != 'NONE':
+                lane_change = next_wp.get('lane_change', '')
+                if 'Left' in str(lane_change):
+                    explanation += "，即将左转"
+                elif 'Right' in str(lane_change):
+                    explanation += "，即将右转"
         
         return explanation
     
-    def _format_data(self, data):
-        """Format the input data for the LLM."""
-        # Extract information from data
-        vehicle_state = data.get('vehicle_state', {})
-        perception = data.get('perception', {})
-        prediction = data.get('prediction', {})
-        planning = data.get('planning', {})
+class ThreadedLLMExplainer(threading.Thread):
+    """
+    A threaded LLM explainer that runs in the background to avoid blocking the main simulation loop.
+    """
+    def __init__(self, llm_explainer, max_queue_size=10):
+        super().__init__(daemon=True)
+        self.llm_explainer = llm_explainer
+        self.input_queue = queue.Queue(maxsize=max_queue_size)
+        self.stop_event = threading.Event()
+        self.logger = logging.getLogger(__name__ + '.ThreadedLLMExplainer')
         
-        # Format vehicle speed
-        speed = vehicle_state.get('speed', 0)
+        # Keep track of recent explanations
+        self.recent_explanations = deque(maxlen=5)
         
-        # Format controls
-        control = vehicle_state.get('control', {})
-        controls_text = f"throttle={control.throttle:.2f}, brake={control.brake:.2f}, steer={control.steer:.2f}"
+    def run(self):
+        """Main thread loop that processes LLM explanation requests."""
+        self.logger.info("LLM explainer thread started")
         
-        # Format environment information (detected objects, etc.)
-        environment_items = []
+        while not self.stop_event.is_set():
+            try:
+                # Wait for input with timeout to allow checking stop_event
+                explanation_input = self.input_queue.get(timeout=0.5)
+                
+                # Process the explanation
+                start_time = time.time()
+                explanation = self.llm_explainer.explain(explanation_input)
+                processing_time = time.time() - start_time
+                
+                # Store the explanation
+                self.recent_explanations.append({
+                    'explanation': explanation,
+                    'timestamp': time.time(),
+                    'processing_time': processing_time
+                })
+                
+                self.logger.info(f"LLM: {explanation} (processed in {processing_time:.2f}s)")
+                
+                # Mark the task as done
+                self.input_queue.task_done()
+                
+            except queue.Empty:
+                # No new data, continue loop
+                continue
+            except Exception as e:
+                self.logger.error(f"LLM explainer error: {e}")
+                # Mark the task as done even if there was an error
+                try:
+                    self.input_queue.task_done()
+                except:
+                    pass
         
-        # Add detected objects
-        detected_objects = perception.get('detected_objects', [])
-        for obj in detected_objects[:3]:  # Limit to most relevant objects
-            cls_id = obj.get('class_id', 'unknown')
-            bbox = obj.get('bbox', [0, 0, 0, 0])
-            
-            # Simple estimation of distance and position (would use actual 3D info in a real system)
-            width = bbox[2] - bbox[0]
-            height = bbox[3] - bbox[1]
-            center_x = (bbox[0] + bbox[2]) / 2
-            
-            # Estimate position (left, center, right)
-            position = "left" if center_x < 320 else ("right" if center_x > 640 else "ahead")
-            
-            # Estimate distance (crude approximation)
-            size = width * height
-            distance = "very close" if size > 40000 else ("close" if size > 10000 else "distant")
-            
-            # Map class ID to name
-            class_names = {
-                0: 'pedestrian',
-                1: 'bicycle',
-                2: 'car',
-                3: 'motorcycle',
-                5: 'bus',
-                7: 'truck',
-                9: 'traffic light',
-                11: 'stop sign'
-            }
-            class_name = class_names.get(cls_id, f"object (id={cls_id})")
-            
-            environment_items.append(f"{class_name} {position}, {distance}")
-        
-        # Add lane information
-        lane_info = perception.get('lane_info', {})
-        lanes = lane_info.get('lanes', [])
-        if lanes:
-            environment_items.append(f"{len(lanes)} lane(s) detected")
-        
-        # Format environment text
-        environment_text = "- " + "\n- ".join(environment_items) if environment_items else "No significant objects detected."
-        
-        # Format planning decision
-        behavior = planning.get('behavior', 'unknown')
-        reason = planning.get('reason', 'driving normally')
-        planning_text = f"{behavior}: {reason}"
-        
-        # Format using the prompt template
-        return self.prompt_template.format(
-            speed=speed,
-            controls=controls_text,
-            environment=environment_text,
-            planning_decision=planning_text
-        )
+        self.logger.info("LLM explainer thread stopped")
     
-    def _explain_local(self, formatted_input):
-        """Generate explanation using local LLM."""
+    def add_explanation_request(self, explanation_input):
+        """Add a new explanation request to the queue (non-blocking)."""
         try:
-            if self._mock_model:
-                return self._mock_explanation(formatted_input)
+            # If queue is full, remove the oldest item to make room
+            if self.input_queue.full():
+                try:
+                    self.input_queue.get_nowait()
+                    self.input_queue.task_done()
+                except queue.Empty:
+                    pass
             
-            # Call the local model
-            output = self.model(
-                formatted_input,
-                temperature=self.model_config['temperature'],
-                top_p=self.model_config['top_p'],
-                max_tokens=self.model_config['max_tokens']
-            )
-            
-            return output['choices'][0]['text'].strip()
-        except Exception as e:
-            print(f"Error generating explanation with local model: {e}")
-            return self._mock_explanation(formatted_input)
+            self.input_queue.put_nowait(explanation_input)
+            return True
+        except queue.Full:
+            self.logger.warning("LLM explanation queue is full, skipping request")
+            return False
     
-    def _explain_openai(self, formatted_input):
-        """Generate explanation using OpenAI API."""
-        try:
-            import openai
-            
-            if self._mock_model:
-                return self._mock_explanation(formatted_input)
-            
-            # Call the OpenAI API
-            response = openai.ChatCompletion.create(
-                model=self.model_config['model'],
-                messages=[
-                    {"role": "system", "content": "You are a autonomous driving system's explainability module."},
-                    {"role": "user", "content": formatted_input}
-                ],
-                temperature=self.model_config['temperature'],
-                max_tokens=self.model_config['max_tokens']
-            )
-            
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            print(f"Error generating explanation with OpenAI API: {e}")
-            return self._mock_explanation(formatted_input)
+    def stop(self):
+        """Stop the thread gracefully."""
+        self.stop_event.set()
+        
+        # Clear the queue
+        while not self.input_queue.empty():
+            try:
+                self.input_queue.get_nowait()
+                self.input_queue.task_done()
+            except queue.Empty:
+                break
     
-    def _explain_anthropic(self, formatted_input):
-        """Generate explanation using Anthropic API."""
-        try:
-            if self._mock_model:
-                return self._mock_explanation(formatted_input)
-            
-            # Call the Anthropic API
-            response = self.model.messages.create(
-                model=self.model_config['model'],
-                messages=[
-                    {"role": "user", "content": formatted_input}
-                ],
-                temperature=self.model_config['temperature'],
-                max_tokens=self.model_config['max_tokens']
-            )
-            
-            return response.content[0].text.strip()
-        except Exception as e:
-            print(f"Error generating explanation with Anthropic API: {e}")
-            return self._mock_explanation(formatted_input)
+    def get_recent_explanations(self, count=1):
+        """Get the most recent explanations."""
+        return list(self.recent_explanations)[-count:]
     
-    def _mock_explanation(self, formatted_input):
-        """Generate a mock explanation when the LLM is not available."""
-        # Simple rule-based explanation based on the input string
-        if "emergency" in formatted_input.lower():
-            return "Performing emergency stop due to an obstacle in our path."
-        elif "traffic light" in formatted_input.lower() and "red" in formatted_input.lower():
-            return "Stopping for a red traffic light ahead."
-        elif "follow_vehicle" in formatted_input.lower():
-            return "Following the vehicle ahead at a safe distance."
-        elif "lane_change_left" in formatted_input.lower():
-            return "Changing to the left lane to pass slower traffic."
-        elif "lane_change_right" in formatted_input.lower():
-            return "Moving to the right lane to maintain proper lane discipline."
-        elif "pedestrian" in formatted_input.lower():
-            return "Slowing down for a pedestrian crossing ahead."
-        elif "speed" in formatted_input.lower() and any(str(speed) in formatted_input for speed in range(50, 151)):
-            return "Maintaining cruising speed on an open road."
-        else:
-            return "Driving normally, following the current lane." 
+    def is_processing(self):
+        """Check if the explainer is currently processing requests."""
+        return not self.input_queue.empty()
