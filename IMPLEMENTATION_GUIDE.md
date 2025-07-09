@@ -6,17 +6,17 @@ This guide explains how to implement and run the LLM-based Explainable Autonomou
 
 Before starting, make sure you have:
 
-1. **CARLA Simulator**: Download and install [CARLA 0.9.13](https://carla.readthedocs.io/en/latest/start_quickstart/)
-2. **Python 3.8+**: The project is built with Python 3.8 or newer
-3. **GPU with CUDA support**: For faster model inference (CPU mode also works)
+1. **CARLA Simulator**: Download and install [CARLA 0.9.13+](https://carla.readthedocs.io/en/latest/start_quickstart/)
+2. **Python 3.8+**: The project requires Python 3.8 or newer
+3. **Hardware Requirements**: GPU recommended but CPU mode works
 4. **Git**: To clone the repository
 
 ## Installation Steps
 
 1. **Clone the Repository**:
 ```bash
-git clone https://github.com/yourusername/llm-explainable-autonomous-driving.git
-cd llm-explainable-autonomous-driving
+git clone https://github.com/yourusername/auto_drive_llm_explainable.git
+cd auto_drive_llm_explainable
 ```
 
 2. **Install Dependencies**:
@@ -24,156 +24,311 @@ cd llm-explainable-autonomous-driving
 pip install -r requirements.txt
 ```
 
-3. **Download Pre-trained Models**:
+This installs all required packages including:
+- PyTorch for YOLOv8 object detection
+- OpenVINO runtime for lane detection
+- OpenCV for image processing
+- CARLA Python API
+- Pygame for visualization
+
+3. **Download Required Models**:
+
+The system will automatically download the YOLOv8 model (`yolov8n.pt`) when first run. For manual download:
 ```bash
-python src/utils/download_models.py --all --install-deps
+# YOLOv8 nano model (lightweight, fast inference)
+wget https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt
 ```
 
-This will:
-- Download YOLOv8 for object detection
-- Provide instructions for downloading LLaMA models
-- Install additional dependencies
-
-4. **Set Environment Variables** (optional, for using API-based LLMs):
+For OpenVINO lane detection model:
 ```bash
-# For OpenAI API
-export OPENAI_API_KEY=your_api_key
+# Create model directory if needed
+mkdir -p converted_model
+# Place your lane detection model as: converted_model/lane_model.xml
+# Contact the project team for the specific model file
+```
 
-# For Anthropic API
-export ANTHROPIC_API_KEY=your_api_key
+4. **Set Environment Variables** (for LLM API):
+```bash
+# For Deepseek API (default)
+export DEEPSEEK_API_KEY=your_api_key
+
+# Or modify the API key directly in carla_sim_llm.py
 ```
 
 5. **Configure CARLA Path**:
 ```bash
-# Add CARLA to your Python path (modify based on your installation)
-export CARLA_PATH=/path/to/your/carla/installation
+# Add CARLA to your system PATH
+export CARLA_ROOT=/path/to/your/carla/installation
+export PYTHONPATH=$PYTHONPATH:$CARLA_ROOT/PythonAPI/carla/dist/carla-0.9.13-py3.8-linux-x86_64.egg
 ```
 
 ## Running the System
 
-### Starting CARLA
+### Step 1: Start CARLA Server
 
-1. **Start CARLA Server**:
+**Option 1: Using the provided script**:
 ```bash
-python run_carla.py --quality-level=Low
+python run_carla.py
 ```
 
-Or manually start CARLA:
+**Option 2: Manual CARLA startup**:
 ```bash
-cd $CARLA_PATH
-./CarlaUE4.sh -quality-level=Low
+cd $CARLA_ROOT
+./CarlaUE4.sh -quality-level=Low -fps=20
 ```
 
-### Running the Autonomous Driving System
+**Important CARLA Settings**:
+- Use `-quality-level=Low` for better performance
+- Set `-fps=20` to match the system expectations
+- Ensure port 2000 is available (default CARLA port)
 
-1. **Basic Run**:
+### Step 2: Run the Autonomous Driving System
+
+**Basic Usage**:
 ```bash
-python main.py
+python carla_sim_llm.py
 ```
 
-2. **With Different LLM Options**:
+**Common Options**:
 ```bash
-# Use local LLM
-python main.py --llm-model=local
+# Set simulation speed and map
+python carla_sim_llm.py --fps 20 --map 2 --weather 1
 
-# Use OpenAI API
-python main.py --llm-model=openai
+# Disable LLM explanations for faster performance
+python carla_sim_llm.py --no-llm
 
-# Use Anthropic API
-python main.py --llm-model=anthropic
+# Disable object detection 
+python carla_sim_llm.py --no-yolo
+
+# Run with different weather conditions
+python carla_sim_llm.py --weather 3  # Options: 0-10
 ```
 
-3. **Additional Options**:
+**All Available Options**:
 ```bash
-# Change resolution
-python main.py --res=800x600
+python carla_sim_llm.py --help
 
-# Disable visualization
-python main.py --no-rendering
-
-# Use a different configuration
-python main.py --config=configs/custom.json
+Options:
+  --fps INT          Simulation frame rate (default: 10)
+  --map STRING       CARLA map ID 1-10 (default: '1') 
+  --weather INT      Weather preset 0-10 (default: 1)
+  --show-map         Show map view (default: False)
+  --model STRING     Lane detection model type (default: 'openvino')
+  --no-llm           Disable LLM explanations
+  --no-yolo          Disable YOLO object detection
 ```
 
-## Creating Custom Configurations
+## System Components
 
-You can modify the default configuration or create a new one:
+### 1. Perception System
 
-1. **Copy the Default Configuration**:
-```bash
-cp configs/default.json configs/custom.json
+**Object Detection (YOLOv8)**
+- Automatically detects 80 object classes
+- Real-time bounding box visualization
+- Confidence thresholding for reliable detection
+- Optimized for CARLA environment
+
+**Lane Detection (OpenVINO)**
+- Deep learning-based lane segmentation
+- Polynomial curve fitting for smooth trajectories
+- Real-time processing at 20+ FPS
+- Robust to lighting and weather conditions
+
+**Traffic Light Detection**
+- Integrated with object detection pipeline
+- State recognition (red, yellow, green)
+- Position-aware filtering for relevant lights
+- Automatic braking for red/yellow lights
+
+### 2. Control System
+
+**Pure Pursuit Controller**
+- Geometric path following algorithm
+- Lookahead distance adaptation
+- Smooth steering commands
+- Curvature-based speed adjustment
+
+**PID Speed Controller**
+- Maintains desired driving speed
+- Smooth acceleration/deceleration
+- Emergency braking capability
+- Traffic-aware speed management
+
+### 3. LLM Explainer
+
+**Threaded Processing**
+- Non-blocking explanation generation
+- 3-second explanation intervals
+- Real-time status indicators
+- Automatic error recovery
+
+**Deepseek API Integration**
+- Fast response times (1-3 seconds)
+- Cost-effective API pricing
+- Structured prompt engineering
+- Rich context formatting
+
+## Customization Options
+
+### 1. Adjusting Detection Sensitivity
+
+Edit detection thresholds in `carla_sim_llm.py`:
+```python
+# Object detection confidence threshold
+confidence_threshold = 0.5  # Default
+
+# Obstacle stopping distances
+min_area_for_stop = 1500  # Bounding box area threshold
+pedestrian_area_threshold = 800  # More sensitive for pedestrians
 ```
 
-2. **Edit the Configuration File** to adjust parameters for:
-   - Perception models
-   - Tracking parameters
-   - Planning behavior
-   - Control parameters
-   - LLM settings
+### 2. Modifying Control Parameters
+
+Adjust controller settings:
+```python
+# Pure Pursuit parameters
+controller = PurePursuitPlusPID(
+    pure_pursuit=PurePursuit(K_dd=0.4, wheel_base=2.65),
+    pid=PIDController(Kp=0.3, Ki=0.1, Kd=0.05, set_point=5.56)
+)
+```
+
+### 3. Changing LLM Configuration
+
+Update LLM settings:
+```python
+llm_config = {
+    'api_key': "your_api_key",
+    'api_base_url': 'https://api.deepseek.com/v1',
+    'api_model': 'deepseek-chat',
+    'max_tokens': 150,  # Explanation length
+    'temperature': 0.7   # Response creativity
+}
+```
 
 ## Troubleshooting
 
-1. **CARLA Connection Issues**:
-   - Make sure CARLA is running before starting the main script
-   - Check if the ports match (default is 2000)
-   - Try restarting CARLA
+### 1. CARLA Connection Issues
 
-2. **Model Loading Errors**:
-   - Ensure models are downloaded correctly
-   - For LLaMA models, follow the instructions from `download_models.py`
-   - If using GPUs, check CUDA availability with `torch.cuda.is_available()`
+**Problem**: "Connection refused" or timeout errors
+**Solutions**:
+- Verify CARLA is running before starting the script
+- Check if port 2000 is available: `netstat -an | grep 2000`
+- Try restarting CARLA server
+- Increase timeout in the script if needed
 
-3. **Performance Issues**:
-   - Lower the resolution with `--res=640x480`
-   - Use smaller models with `download_models.py --small`
-   - Run CARLA with lower quality `--quality-level=Low`
+### 2. Model Loading Errors
 
-## Extending the System
+**Problem**: YOLOv8 model not found
+**Solutions**:
+- Ensure `yolov8n.pt` is in the project root directory
+- Check internet connection for automatic download
+- Manually download the model file
 
-### Adding New Perception Models
+**Problem**: OpenVINO lane model missing
+**Solutions**:
+- Verify `converted_model/lane_model.xml` exists
+- Check file permissions
+- Contact project team for model file
 
-To add a new object detection model:
+### 3. Performance Issues
 
-1. Modify `src/perception/object_detection.py` to include your model
-2. Update the configuration in `configs/default.json`
+**Problem**: Low frame rate or stuttering
+**Solutions**:
+- Lower CARLA quality: `--quality-level=Low`
+- Reduce simulation FPS: `--fps 10`
+- Disable LLM: `--no-llm`
+- Use CPU-only mode if GPU memory is limited
 
-### Customizing the LLM Explainer
+**Problem**: LLM explanations slow or failing
+**Solutions**:
+- Check internet connection
+- Verify API key is correct
+- Monitor API rate limits
+- Use `--no-llm` for testing
 
-To modify explanations:
+### 4. Camera and Detection Issues
 
-1. Edit the prompt template in `configs/default.json` under the `explainability` section
-2. Adjust the data formatting in `src/explainability/llm_explainer.py`
+**Problem**: Poor lane detection
+**Solutions**:
+- Check camera pitch angle settings
+- Verify OpenVINO model compatibility
+- Adjust lighting conditions in CARLA
 
-### Adding New Planning Behaviors
+**Problem**: Missing object detections
+**Solutions**:
+- Lower confidence threshold
+- Check YOLOv8 model version compatibility
+- Verify camera image quality
 
-To add new driving behaviors:
+## Performance Optimization
 
-1. Update `src/planning/behavior_planner.py` with new behavior states
-2. Implement the corresponding decision logic
-3. Ensure the new behaviors have appropriate explanations
+### 1. Hardware Optimization
+
+**For CPU-only systems**:
+- Use `--fps 10` for lower computational load
+- Disable resource-heavy features: `--no-yolo --no-llm`
+- Close unnecessary applications
+
+**For GPU systems**:
+- Monitor GPU memory usage
+- Use CUDA for PyTorch operations
+- Consider larger batch sizes for detection
+
+### 2. Software Optimization
+
+**Memory Usage**:
+- The system typically uses 2-4GB RAM
+- GPU memory usage: 1-2GB for YOLO + OpenVINO
+- Monitor with `nvidia-smi` or system tools
+
+**Network Usage**:
+- LLM API calls: ~1KB per request every 3 seconds
+- Total network usage: minimal (<1MB/hour)
+
+## Development and Extension
+
+### 1. Adding New Features
+
+**New Object Classes**:
+- Modify YOLO class filtering
+- Update detection visualization
+- Add new blocking object logic
+
+**Enhanced Control**:
+- Implement advanced controllers (MPC, etc.)
+- Add lane change capabilities
+- Improve emergency maneuvers
+
+### 2. Integration with Other Systems
+
+**ROS Integration**:
+- Wrap components as ROS nodes
+- Use ROS messages for communication
+- Enable distributed processing
+
+**Real Vehicle Integration**:
+- Replace CARLA sensors with real cameras
+- Adapt coordinate systems
+- Add safety monitoring
 
 ## System Evaluation
 
-To evaluate the system's performance:
+### 1. Performance Metrics
 
-1. **Perception Accuracy**:
-   - Monitor detection results in the visualization
-   - Compare with ground truth in CARLA
+Monitor these key indicators:
+- Frame rate: Should maintain 20+ FPS
+- Detection accuracy: >90% for relevant objects
+- LLM response rate: >95% successful
+- Control smoothness: Low jerk and acceleration
 
-2. **Planning Quality**:
-   - Observe the vehicle's behavior in different scenarios
-   - Check if it follows traffic rules
+### 2. Safety Testing
 
-3. **Explanation Quality**:
-   - Assess if explanations match the vehicle's actions
-   - Check if they are human-understandable
+Test in various scenarios:
+- Different weather conditions
+- Heavy traffic situations
+- Pedestrian crossings
+- Emergency braking scenarios
+- Traffic light compliance
 
-## Next Steps
-
-After implementing the basic system, consider these enhancements:
-
-1. Train models on CARLA data for better performance
-2. Implement more sophisticated planning algorithms
-3. Add support for complex scenarios like intersections
-4. Enhance the explainability module with visual explanations
-5. Conduct user studies to evaluate explanation quality 
+Verify explanations match actual system behavior and are understandable to users. 

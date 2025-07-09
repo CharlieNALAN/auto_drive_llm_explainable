@@ -6,115 +6,175 @@ This document shows the architecture of the LLM-based explainable autonomous dri
 
 The project creates an autonomous driving system that:
 1. Runs in the CARLA simulator
-2. Uses pre-trained models for perception
-3. Has a rule-based planning system
+2. Uses deep learning models for perception 
+3. Has an integrated control system
 4. Explains its actions using Large Language Models (LLMs)
 
-## System Architecture
+## Current System Architecture
+
+The system now uses an integrated architecture in `carla_sim_llm.py`. This design combines all components in a single file for better performance and simplicity.
 
 ```
-CARLA Simulator <---> Main Loop (main.py)
+CARLA Simulator <---> carla_sim_llm.py (Integrated System)
     |
     v
-+---------------------+    +-----------------+    +------------------+   +--------------+
-| Perception          |    | Prediction      |    | Planning         |   | Control      |
-| - Object Detection  |--->| - Trajectory    |--->| - Behavior       |-->| - PID        |
-| - Lane Detection    |    |   Prediction    |    | - Path Planning  |   |   Controller |
-+---------------------+    +-----------------+    +------------------+   +--------------+
-                                                         |
-                                                         v
-                                              +---------------------------+
-                                              | LLM Explainability Module |
-                                              | - Natural Language        |
-                                              |   Explanations            |
-                                              +---------------------------+
++------------------------+    +------------------+    +-----------------+
+| Perception             |    | Control          |    | Explainability |
+| - YOLOv8 Object Detect |---→| - Pure Pursuit   |    | - Threaded LLM  |
+| - OpenVINO Lane Detect |    | - PID Controller |    | - Deepseek API  |
+| - Traffic Light Detect |    | - Brake Control  |    | - Real-time     |
++------------------------+    +------------------+    +-----------------+
+         |                              ↑
+         ↓                              |
++------------------------+              |
+| Planning & Decision    |              |
+| - Obstacle Avoidance   |--------------+
+| - Traffic Light Rules  |
+| - Lane Following       |
+| - Emergency Braking    |
++------------------------+
 ```
 
-## Component Explanation
+## Component Details
 
-### 1. Perception Module
+### 1. Perception System
 
-**Object Detection**
-- Uses YOLOv8 for detecting objects like vehicles, pedestrians, traffic lights
-- Pre-trained on COCO dataset
+**Object Detection (YOLOv8)**
+- Detects vehicles, pedestrians, traffic lights, and other objects
+- Pre-trained on COCO dataset with 80 object classes
 - Returns bounding boxes, class IDs, and confidence scores
+- Real-time processing with CPU/GPU support
 
-**Lane Detection**
-- Uses DeepLabV3+ for semantic segmentation
-- Also includes traditional computer vision methods as fallback
-- Returns lane line information
+**Lane Detection (OpenVINO)**
+- Uses pre-trained deep learning model for lane segmentation
+- Processes camera images to detect left and right lane lines
+- Fits polynomial curves to detected lane pixels
+- Generates smooth trajectory for vehicle following
 
-### 2. Prediction Module
+**Traffic Light Detection**
+- Integrated with object detection pipeline
+- Identifies traffic light states (red, yellow, green)
+- Only considers front-facing traffic lights in driving path
+- Triggers appropriate braking behavior
 
-**Trajectory Prediction**
-- Uses Kalman filters to track objects
-- Predicts future trajectories of detected objects
-- Helps the planning module anticipate the movement of other road users
+### 2. Control System
 
-### 3. Planning Module
-
-**Behavior Planner**
-- Rule-based behavior planning
-- Handles decisions like lane following, vehicle following, lane changes
-- Provides clear explanations for each decision
-
-**Path Planner**
-- Generates trajectories based on behavior decisions
-- Uses simplified Frenet frame planning
-- Creates path points and speed profiles
-
-### 4. Control Module
+**Pure Pursuit Controller**
+- Geometric path tracking algorithm
+- Uses lookahead distance for smooth steering
+- Calculates steering angle based on target waypoint
+- Adapts to vehicle speed and path curvature
 
 **PID Controller**
-- Simple PID controller for lateral (steering) and longitudinal (throttle/brake) control
-- Follows the planned trajectory
+- Controls throttle and brake for speed management
+- Maintains desired speed based on road conditions
+- Adjusts for traffic light stops and obstacle avoidance
+- Provides smooth acceleration and deceleration
 
-### 5. LLM Explainability Module
+**Integrated Control Logic**
+- Combines steering from Pure Pursuit and speed from PID
+- Handles emergency braking for obstacles
+- Manages traffic light compliance
+- Ensures safe driving behavior
 
-The core innovation of this system:
+### 3. Planning & Decision Making
 
-- Receives inputs from all other modules
-- Formats this information into a natural language prompt
-- Uses a Large Language Model to generate human-readable explanations
-- Supports multiple LLM options:
-  - Local LLM (Llama 2/3, quantized for efficient inference)
-  - OpenAI API (GPT-3.5/4)
-  - Anthropic API (Claude)
+**Rule-Based Behavior System**
+- Lane following as primary behavior
+- Obstacle detection and avoidance
+- Traffic light compliance
+- Emergency stopping for pedestrians
+
+**Obstacle Avoidance Logic**
+- Detects blocking objects in vehicle's path
+- Uses bounding box size to estimate distance
+- Different thresholds for different object types
+- Immediate braking for close obstacles
+
+**Traffic Rules Implementation**
+- Stops for red and yellow traffic lights
+- Only considers traffic lights in front center area
+- Continues on green lights
+- Handles unknown traffic light states safely
+
+### 4. LLM Explainability System
+
+**Threaded Processing**
+- Runs LLM explanations in separate thread
+- Non-blocking operation maintains real-time performance
+- Processes explanations every 3 seconds (60 frames)
+- Queues requests to avoid overwhelming the API
+
+**Deepseek API Integration**
+- Uses Deepseek Chat model for explanation generation
+- Formats driving context into structured prompts
+- Processes vehicle state, environment, and decisions
+- Returns natural language explanations
+
+**Context Processing**
+- Categorizes detected objects by relevance
+- Includes vehicle dynamics and control inputs
+- Provides road information and waypoint data
+- Formats blocking objects and traffic light states
 
 ## Data Flow
 
-1. CARLA provides sensor data (camera, lidar)
-2. Perception models process this data to identify objects and lanes
-3. Prediction models track objects and predict trajectories
-4. Behavior planner decides what the vehicle should do next
-5. Path planner creates a detailed trajectory
-6. Controller executes the trajectory
-7. LLM explainer creates natural language explanations
+1. CARLA provides camera sensor data
+2. YOLOv8 detects objects and traffic lights
+3. OpenVINO processes lane detection
+4. Planning system decides vehicle actions
+5. Pure Pursuit + PID generates control commands
+6. LLM explainer creates natural language explanations
+7. Visual feedback shows system status
 
-## Key Files
+## Key Advantages of Integrated Architecture
 
-- `main.py`: Main entry point, orchestrates all components
-- `run_carla.py`: Script to start CARLA simulator
-- `src/perception/`: Object and lane detection
-- `src/prediction/`: Trajectory prediction
-- `src/planning/`: Behavior and path planning
-- `src/control/`: Vehicle control
-- `src/explainability/`: LLM-based explanation generation
-- `src/utils/`: Utility functions for CARLA, visualization, etc.
+**Performance Benefits**
+- Reduced inter-module communication overhead
+- Faster data processing and decision making
+- Direct access to all system variables
+- Optimized memory usage
+
+**Simplicity Benefits**
+- Single file contains complete system
+- Easier debugging and modification
+- Clear data flow and dependencies
+- Reduced complexity for new developers
+
+**Reliability Benefits**
+- Fewer failure points
+- Better error handling
+- Consistent system state
+- Easier testing and validation
+
+## File Structure
+
+**Main Implementation**
+- `carla_sim_llm.py`: Complete integrated system
+- `src/explainability/llm_explainer.py`: LLM processing modules
+- `src/perception/object_detection.py`: YOLO detector wrapper
+- `src/perception/traffic_light_detector.py`: Traffic light processing
+
+**Legacy Modules** (for reference)
+- `src/control/`: PID and Pure Pursuit implementations
+- `src/planning/`: Behavior and path planning modules
+- `src/utils/`: CARLA utilities and visualization
 
 ## Configuration
 
-The system is configured using:
-- Command-line arguments in `main.py`
-- Configuration files in the `configs/` directory
-- The default configuration file is `configs/default.json`
+The system uses command-line arguments for configuration:
+- `--fps`: Simulation frame rate
+- `--map`: CARLA map selection (1-10)
+- `--weather`: Weather preset index
+- `--no-llm`: Disable LLM explanations
+- `--no-yolo`: Disable object detection
 
 ## Extensibility
 
-The system is designed to be modular and extensible:
+The integrated architecture still supports extensions:
 
-1. **Perception**: New detection models can be added
-2. **Prediction**: Alternative prediction algorithms can be implemented
-3. **Planning**: More sophisticated planning algorithms can replace the rule-based approach
-4. **Control**: Advanced controllers like MPC can be added
-5. **Explainability**: Different LLMs can be used by changing configuration 
+1. **Perception**: Add new detection models in perception functions
+2. **Control**: Modify controller parameters or add new algorithms  
+3. **Planning**: Extend decision-making logic
+4. **Explainability**: Change LLM models or improve prompts
+5. **Environment**: Add more NPC vehicles or complex scenarios 
