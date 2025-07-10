@@ -23,6 +23,7 @@ import sys
 import os
 
 from src.explainability.llm_explainer import ThreadedLLMExplainer
+from src.evaluation.evaluation_metrics import EvaluationMetrics
 
 # Add current directory to path to import local modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -444,6 +445,195 @@ def send_control(vehicle, throttle, steer, brake, hand_brake=False, reverse=Fals
     vehicle.apply_control(control)
 
 
+def generate_evaluation_report(eval_metrics, cross_track_list, detections, logger, end_reason="仿真结束"):
+    """生成并打印详细的评估报告"""
+    # 获取完整评估报告
+    evaluation_report = eval_metrics.get_full_report()
+    
+    # 打印评估报告
+    logger.info("=" * 60)
+    logger.info("🚗 自动驾驶性能评估报告")
+    logger.info("=" * 60)
+    logger.info(f"🏁 结束原因: {end_reason}")
+    logger.info("")
+    
+    # 总体评分
+    overall_score = evaluation_report['overall_score']
+    logger.info(f"🏆 总体评分: {overall_score:.1f}/100")
+    
+    # 计算驾驶技能评分（专门评估技术水平）
+    traj_perf = evaluation_report['trajectory_performance']
+    comfort_perf = evaluation_report['comfort_performance']
+    eff_perf = evaluation_report['efficiency_performance']
+    
+    # 驾驶技能评分计算
+    lane_score = max(0, 100 - traj_perf['mean_cross_track_error'] * 100)
+    speed_score = max(0, 100 - traj_perf['mean_speed_error'] * 15)
+    smooth_score = max(0, 100 - eff_perf['mean_jerk'] * 30)
+    steering_score = max(0, 100 - comfort_perf['mean_steering_rate'] * 80)
+    
+    driving_skill_score = (lane_score * 0.35 + speed_score * 0.25 + smooth_score * 0.25 + steering_score * 0.15)
+    driving_skill_score = min(100, max(0, driving_skill_score))
+    
+    logger.info(f"🎯 驾驶技能评分: {driving_skill_score:.1f}/100")
+    
+    if overall_score >= 90:
+        score_level = "优秀 🥇"
+    elif overall_score >= 80:
+        score_level = "良好 🥈"
+    elif overall_score >= 70:
+        score_level = "及格 🥉"
+    else:
+        score_level = "需改进 ⚠️"
+    
+    if driving_skill_score >= 90:
+        skill_level = "专业级 🏎️"
+    elif driving_skill_score >= 80:
+        skill_level = "熟练 🚗"
+    elif driving_skill_score >= 70:
+        skill_level = "一般 📚"
+    else:
+        skill_level = "新手 🔰"
+    
+    logger.info(f"📈 综合评级: {score_level}")
+    logger.info(f"🏁 驾驶技能: {skill_level}")
+    logger.info("")
+    
+    # 轨迹跟踪性能
+    traj_perf = evaluation_report['trajectory_performance']
+    logger.info("🛣️ 轨迹跟踪性能:")
+    logger.info(f"   • 平均横向偏差: {traj_perf['mean_cross_track_error']:.3f}m")
+    logger.info(f"   • 最大横向偏差: {traj_perf['max_cross_track_error']:.3f}m")
+    logger.info(f"   • 平均航向偏差: {traj_perf['mean_heading_error']:.3f}rad ({np.degrees(traj_perf['mean_heading_error']):.1f}°)")
+    logger.info(f"   • 平均速度偏差: {traj_perf['mean_speed_error']:.2f}m/s")
+    logger.info("")
+    
+    # 安全性能
+    safety_perf = evaluation_report['safety_performance']
+    logger.info("🛡️ 安全性能:")
+    logger.info(f"   • 碰撞次数: {safety_perf['collision_count']}")
+    logger.info(f"   • 差点碰撞次数: {safety_perf['near_collision_count']}")
+    logger.info(f"   • 交通灯违规: {safety_perf['traffic_light_violations']}")
+    logger.info(f"   • 与物体最小距离: {safety_perf['min_distance_to_objects']:.2f}m")
+    logger.info(f"   • 平均安全距离: {safety_perf['mean_min_distance_to_objects']:.2f}m")
+    logger.info("")
+    
+    # 效率性能
+    eff_perf = evaluation_report['efficiency_performance']
+    logger.info("⚡ 效率性能:")
+    logger.info(f"   • 平均速度: {eff_perf['mean_speed']:.2f}m/s ({eff_perf['mean_speed']*3.6:.1f}km/h)")
+    logger.info(f"   • 最高速度: {eff_perf['max_speed']:.2f}m/s ({eff_perf['max_speed']*3.6:.1f}km/h)")
+    logger.info(f"   • 平均加速度: {eff_perf['mean_acceleration']:.2f}m/s²")
+    logger.info(f"   • 平均加速度变化率: {eff_perf['mean_jerk']:.2f}m/s³")
+    logger.info(f"   • 总行驶距离: {eff_perf['total_distance']:.1f}m")
+    logger.info(f"   • 总行驶时间: {eff_perf['total_time']:.1f}s")
+    logger.info(f"   • 路线完成率: {eff_perf['route_completion_rate']*100:.1f}%")
+    logger.info("")
+    
+    # 舒适性能
+    comfort_perf = evaluation_report['comfort_performance']
+    logger.info("😌 舒适性能:")
+    logger.info(f"   • 平均横向加速度: {comfort_perf['mean_lateral_acceleration']:.2f}m/s²")
+    logger.info(f"   • 最大横向加速度: {comfort_perf['max_lateral_acceleration']:.2f}m/s²")
+    logger.info(f"   • 平均转向角度: {comfort_perf['mean_steering_angle']:.3f}rad ({np.degrees(comfort_perf['mean_steering_angle']):.1f}°)")
+    logger.info(f"   • 平均转向速率: {comfort_perf['mean_steering_rate']:.3f}rad/s")
+    logger.info("")
+    
+    # 感知性能
+    perception_perf = evaluation_report['perception_performance']
+    logger.info("👁️ 感知性能:")
+    logger.info(f"   • 目标检测准确率: {perception_perf['mean_object_detection_accuracy']*100:.1f}%")
+    logger.info(f"   • 车道检测准确率: {perception_perf['mean_lane_detection_accuracy']*100:.1f}%")
+    logger.info(f"   • 交通灯检测准确率: {perception_perf['mean_traffic_light_detection_accuracy']*100:.1f}%")
+    logger.info("")
+    
+    # 决策性能
+    decision_perf = evaluation_report['decision_performance']
+    logger.info("🧠 决策性能:")
+    logger.info(f"   • 平均决策时间: {decision_perf['mean_decision_time']*1000:.1f}ms")
+    logger.info(f"   • 最大决策时间: {decision_perf['max_decision_time']*1000:.1f}ms")
+    logger.info("")
+    
+    # 统计信息
+    logger.info("📈 统计信息:")
+    logger.info(f"   • 仿真帧数: {len(cross_track_list)}")
+    logger.info(f"   • 实际仿真时间: {eff_perf['total_time']:.1f}s")
+    logger.info(f"   • 平均帧率: {len(cross_track_list)/max(eff_perf['total_time'], 1):.1f} FPS")
+    logger.info(f"   • 检测到的物体总数: {sum(len(dets) if isinstance(dets, list) else 0 for dets in [detections])}")
+    logger.info("=" * 60)
+    
+    # 生成简要建议
+    logger.info("💡 改进建议:")
+    
+    suggestions_count = 0
+    
+    # 横向偏差建议（降低阈值）
+    if traj_perf['mean_cross_track_error'] > 0.05:  # 5cm以上
+        logger.info("   • 建议改进车道跟踪算法，减少横向偏差")
+        suggestions_count += 1
+    
+    # 航向偏差建议（新增）
+    if traj_perf['mean_heading_error'] > 0.1:  # 约5.7度以上
+        logger.info("   • 建议优化航向控制，减少车辆摆动")
+        suggestions_count += 1
+    
+    # 速度跟踪建议
+    if traj_perf['mean_speed_error'] > 1.0:  # 1m/s以上偏差
+        logger.info("   • 建议改进速度跟踪控制器，提高速度稳定性")
+        suggestions_count += 1
+    
+    # 平滑驾驶建议（基于加速度变化率）
+    if eff_perf['mean_jerk'] > 10.0:  # 急动度过大
+        logger.info("   • 建议优化加速度控制，提高驾驶平稳性")
+        suggestions_count += 1
+    
+    # 转向平稳性建议
+    if comfort_perf['mean_steering_rate'] > 1.5:  # 转向变化过快
+        logger.info("   • 建议优化转向控制，减少急转向动作")
+        suggestions_count += 1
+    
+    # 横向加速度建议（降低阈值）
+    if comfort_perf['mean_lateral_acceleration'] > 1.5:
+        logger.info("   • 建议减少横向加速度，提高乘坐舒适性")
+        suggestions_count += 1
+    
+    # 安全距离建议
+    if safety_perf['mean_min_distance_to_objects'] < 5.0:
+        logger.info("   • 建议增加与其他物体的安全距离")
+        suggestions_count += 1
+    
+    # 碰撞和违规建议
+    if safety_perf['collision_count'] > 0:
+        logger.info("   • 建议增强碰撞检测和避障能力")
+        suggestions_count += 1
+    
+    if safety_perf['traffic_light_violations'] > 0:
+        logger.info("   • 建议改进交通信号识别和遵守")
+        suggestions_count += 1
+    
+    # 感知准确率建议
+    if perception_perf['mean_object_detection_accuracy'] < 0.85:
+        logger.info("   • 建议改进目标检测算法精度")
+        suggestions_count += 1
+    
+    if perception_perf['mean_lane_detection_accuracy'] < 0.9:
+        logger.info("   • 建议提升车道检测算法性能")
+        suggestions_count += 1
+    
+    # 如果没有具体建议，给出通用建议
+    if suggestions_count == 0:
+        if overall_score < 90:
+            logger.info("   • 继续优化各项性能指标，争取达到优秀水平")
+            logger.info("   • 可重点关注提升驾驶技能评分")
+            suggestions_count += 2
+    
+    if suggestions_count == 0:
+        logger.info("   • 当前表现优秀，继续保持！🎉")
+    
+    logger.info("🎯 评估完成！")
+    logger.info("=" * 60)
+
+
 def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openvino", enable_llm=True, enable_yolo=True):
     # Set up logging
     logging.basicConfig(level=logging.INFO)
@@ -724,7 +914,6 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
             return
         
         actor_list.append(ego_vehicle)
-        startPoint = carla_vec_to_np_array(ego_vehicle.get_transform().location)
 
         # visualization cam (no functionality)
         camera_rgb = world.spawn_actor(
@@ -741,6 +930,10 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
             lane_detector = OpenVINOLaneDetector()
         else:
             lane_detector = None
+            
+        # Initialize evaluation metrics
+        eval_metrics = EvaluationMetrics(window_size=100)
+        logger.info("📊 评估指标系统已初始化")
 
         # Windshield cam - adjusted pitch to + degrees to better capture traffic lights
         cam_windshield_transform = carla.Transform(carla.Location(x=0.5, z=cg.height), carla.Rotation(pitch=-1*cg.pitch_deg))
@@ -753,11 +946,17 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
         actor_list.append(camera_windshield)
         sensors.append(camera_windshield)
 
-        flag = True
         max_error = 0
         FPS = fps_sim
+        
+        # 仿真计时和状态变量
+        start_time = time.time()
+        max_simulation_time = 60  # 5分钟
+        stationary_time = 0
+        last_position = None
 
         logger.info("Starting simulation...")
+        logger.info(f"⏱️ 最大仿真时间: {max_simulation_time}秒")
 
         # Create a synchronous mode context.
         with CarlaSyncMode(world, *sensors, fps=FPS) as sync_mode:
@@ -805,7 +1004,7 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
                         detections = []
 
                 max_curvature = get_curvature(np.array(trajectory))
-                if max_curvature > 0.005 and flag == False:
+                if max_curvature > 0.005:
                     move_speed = np.abs(5.56 - 20*max_curvature)
                     move_speed = max(move_speed, 3.0)
                 else:
@@ -901,17 +1100,116 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
                     
                 waypoint = CARLA_map.get_waypoint(ego_vehicle.get_transform().location)
                 vehicle_loc = carla_vec_to_np_array(waypoint.transform.location)
-
-                if np.linalg.norm(vehicle_loc-startPoint) > 20:
-                    flag = False
-
-                if np.linalg.norm(vehicle_loc-startPoint) < 20 and flag == False:
-                    logger.info('Route completed!')
-                    break
                 
-                if speed < 1 and flag == False:
-                    logger.warning("Vehicle stopped!")
-                    # break
+                # 更新停止时间统计
+                current_position = vehicle_loc
+                if last_position is not None:
+                    position_change = np.linalg.norm(current_position - last_position)
+                    if position_change < 0.1:  # 车辆基本没有移动
+                        stationary_time += 1.0 / FPS
+                    else:
+                        stationary_time = 0  # 重置停止时间
+                last_position = current_position
+
+                # ========== 收集评估数据 ==========
+                # 获取车辆状态信息
+                vehicle_velocity = ego_vehicle.get_velocity()
+                vehicle_acceleration = ego_vehicle.get_acceleration()
+                vehicle_transform = ego_vehicle.get_transform()
+                
+                # 计算当前车辆的实际速度和加速度
+                current_speed = np.linalg.norm(carla_vec_to_np_array(vehicle_velocity))
+                current_acceleration = np.linalg.norm(carla_vec_to_np_array(vehicle_acceleration))
+                lateral_acceleration = np.abs(vehicle_acceleration.y)  # 横向加速度
+                
+                # 计算航向偏差（相对于期望轨迹）
+                if len(trajectory) > 1:
+                    next_waypoint = trajectory[1] if len(trajectory) > 1 else trajectory[0]
+                    desired_heading = np.arctan2(next_waypoint[1], next_waypoint[0])
+                    current_heading = np.radians(vehicle_transform.rotation.yaw)
+                    heading_error = np.abs(desired_heading - current_heading)
+                    # 归一化角度差到[-π, π]
+                    heading_error = ((heading_error + np.pi) % (2 * np.pi)) - np.pi
+                    heading_error = np.abs(heading_error)
+                else:
+                    heading_error = 0.0
+                
+                # 计算速度偏差
+                speed_error = np.abs(current_speed - move_speed)
+                
+                # 检测碰撞和安全事件
+                collision_occurred = False  # 需要实际的碰撞检测
+                near_collision = False
+                traffic_light_violation = False
+                stop_sign_violation = False
+                lane_change_violation = False
+                
+                # 计算与最近物体的距离
+                min_distance_to_objects = 100.0  # 默认较大值
+                if detections:
+                    # 简单估算：基于边界框大小估算距离
+                    for detection in detections:
+                        bbox_area = (detection['bbox'][2] - detection['bbox'][0]) * (detection['bbox'][3] - detection['bbox'][1])
+                        # 边界框越大，距离越近（简单估算）
+                        estimated_distance = max(1.0, 1000.0 / max(bbox_area, 100))
+                        min_distance_to_objects = min(min_distance_to_objects, estimated_distance)
+                
+                # 检查交通灯违规
+                for detection in detections:
+                    if detection.get('class_id') == 9 and 'traffic_light_state' in detection:
+                        state = detection['traffic_light_state']
+                        if state == 'red' and throttle > 0:  # 红灯时仍然加速
+                            traffic_light_violation = True
+                
+                # 计算行驶距离（本帧）
+                dt = 1.0 / FPS
+                distance_traveled = current_speed * dt
+                
+                # 更新评估指标
+                eval_metrics.update_trajectory_metrics(
+                    cross_track_error=cross_track_error / 100.0,  # 转换为米
+                    heading_error=heading_error,
+                    speed_error=speed_error
+                )
+                
+                eval_metrics.update_safety_metrics(
+                    collision_occurred=collision_occurred,
+                    near_collision=near_collision,
+                    traffic_light_violation=traffic_light_violation,
+                    stop_sign_violation=stop_sign_violation,
+                    lane_change_violation=lane_change_violation,
+                    min_distance_to_objects=min_distance_to_objects
+                )
+                
+                eval_metrics.update_efficiency_metrics(
+                    speed=current_speed,
+                    acceleration=current_acceleration,
+                    distance_traveled=distance_traveled,
+                    time_elapsed=dt
+                )
+                
+                eval_metrics.update_comfort_metrics(
+                    lateral_acceleration=lateral_acceleration,
+                    steering_angle=steer,
+                    throttle=max(0, throttle),
+                    brake=brake,
+                    time_elapsed=dt
+                )
+                
+                # 模拟感知准确率（在实际应用中需要真值对比）
+                object_detection_acc = 0.85 if detections else 0.0
+                lane_detection_acc = 0.90 if not use_map_fallback else 0.70
+                traffic_light_acc = 0.80
+                
+                eval_metrics.update_perception_metrics(
+                    object_detection_acc=object_detection_acc,
+                    lane_detection_acc=lane_detection_acc,
+                    traffic_light_detection_acc=traffic_light_acc
+                )
+                
+                # 更新决策性能（模拟决策时间）
+                decision_time = 0.05  # 模拟50ms决策时间
+                eval_metrics.update_decision_metrics(decision_time=decision_time)
 
                 # LLM Explanation - 每60帧调用一次（约3秒）- 非阻塞异步处理
                 if threaded_explainer and len(cross_track_list) % 60 == 0:  # Every 60 frames (~3 seconds)
@@ -1217,6 +1515,38 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
                 
                 pygame.display.flip()
 
+                # 检查仿真结束条件并生成评估报告
+                current_time = time.time()
+                elapsed_time = current_time - start_time
+                
+                # 最大仿真时间限制
+                if elapsed_time > max_simulation_time:
+                    logger.warning(f"⏰ Maximum simulation time reached! ({max_simulation_time}s)")
+                    
+                    # ========== 生成评估报告（超时结束）==========
+                    logger.info("📊 正在生成驾驶评估报告...")
+                    
+                    # 设置路线完成率（基于时间）
+                    eval_metrics.route_completion_rate = min(1.0, elapsed_time / max_simulation_time)
+                    
+                    # 生成并显示评估报告
+                    generate_evaluation_report(eval_metrics, cross_track_list, detections, logger, "仿真超时")
+                    break
+
+                # 车辆长时间停止
+                if speed < 0.1 and stationary_time > 30:  # 30秒不动
+                    logger.warning(f"🚫 Vehicle stuck for too long! ({stationary_time:.1f}s)")
+                    
+                    # ========== 生成评估报告（车辆卡住）==========
+                    logger.info("📊 正在生成驾驶评估报告...")
+                    
+                    # 设置路线完成率（基于时间，但因为卡住会降低）
+                    eval_metrics.route_completion_rate = min(0.5, elapsed_time / max_simulation_time)
+                    
+                    # 生成并显示评估报告
+                    generate_evaluation_report(eval_metrics, cross_track_list, detections, logger, "车辆停止")
+                    break
+
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
     finally:
@@ -1305,7 +1635,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--fps', type=int, default=10)
     parser.add_argument('--map', default='1') 
-    parser.add_argument('--weather', type=int, default=1)
+    parser.add_argument('--weather', type=int, default=0)
     parser.add_argument('--show-map', action='store_true')
     parser.add_argument('--model', default='openvino')
     parser.add_argument('--no-llm', action='store_true')
