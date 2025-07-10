@@ -4,10 +4,9 @@
 """
 
 import numpy as np
-import math
-from typing import Dict, List, Tuple, Optional
+from typing import Dict
 from collections import deque
-import logging
+
 
 class EvaluationMetrics:
     """自动驾驶算法评估指标类"""
@@ -69,8 +68,8 @@ class EvaluationMetrics:
         self.prev_throttle = 0.0
         self.prev_brake = 0.0
         
-    def update_trajectory_metrics(self, cross_track_error: float, heading_error: float, 
-                                speed_error: float):
+    def update_trajectory_metrics(self, cross_track_error: float, heading_error: float,
+                                  speed_error: float):
         """
         更新轨迹跟踪指标
         
@@ -84,8 +83,8 @@ class EvaluationMetrics:
         self.speed_errors.append(abs(speed_error))
         
     def update_safety_metrics(self, collision_occurred: bool, near_collision: bool,
-                            traffic_light_violation: bool, stop_sign_violation: bool,
-                            lane_change_violation: bool, min_distance_to_objects: float):
+                              traffic_light_violation: bool, stop_sign_violation: bool,
+                              lane_change_violation: bool, min_distance_to_objects: float):
         """
         更新安全性指标
         
@@ -110,8 +109,8 @@ class EvaluationMetrics:
             
         self.min_distances_to_objects.append(min_distance_to_objects)
         
-    def update_efficiency_metrics(self, speed: float, acceleration: float, 
-                                distance_traveled: float, time_elapsed: float):
+    def update_efficiency_metrics(self, speed: float, acceleration: float,
+                                  distance_traveled: float, time_elapsed: float):
         """
         更新效率性指标
         
@@ -135,7 +134,7 @@ class EvaluationMetrics:
         self.prev_acceleration = acceleration
         
     def update_comfort_metrics(self, lateral_acceleration: float, steering_angle: float,
-                             throttle: float, brake: float, time_elapsed: float):
+                               throttle: float, brake: float, time_elapsed: float):
         """
         更新舒适性指标
         
@@ -165,9 +164,9 @@ class EvaluationMetrics:
         self.prev_throttle = throttle
         self.prev_brake = brake
         
-    def update_perception_metrics(self, object_detection_acc: float, 
-                                lane_detection_acc: float, 
-                                traffic_light_detection_acc: float):
+    def update_perception_metrics(self, object_detection_acc: float,
+                                  lane_detection_acc: float,
+                                  traffic_light_detection_acc: float):
         """
         更新感知性能指标
         
@@ -314,9 +313,9 @@ class EvaluationMetrics:
         
         # 感知性能评分
         perception_perf = self.get_perception_performance()
-        scores['perception'] = (perception_perf['mean_object_detection_accuracy'] + 
-                              perception_perf['mean_lane_detection_accuracy'] + 
-                              perception_perf['mean_traffic_light_detection_accuracy']) / 3 * 100
+        scores['perception'] = (perception_perf['mean_object_detection_accuracy'] +
+                                perception_perf['mean_lane_detection_accuracy'] +
+                                perception_perf['mean_traffic_light_detection_accuracy']) / 3 * 100
         
         # 决策性能评分
         decision_perf = self.get_decision_performance()
