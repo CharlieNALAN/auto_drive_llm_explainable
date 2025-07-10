@@ -862,7 +862,7 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
         spawn_points = CARLA_map.get_spawn_points()
         
         spawned_vehicles = []
-        for i in range(100):  # 生成20辆NPC车辆
+        for i in range(10):  # 生成20辆NPC车辆
             vehicle = world.try_spawn_actor(random.choice(vehicle_blueprints), random.choice(spawn_points))
             if vehicle is not None:
                 spawned_vehicles.append(vehicle)
@@ -878,7 +878,7 @@ def main(fps_sim=100, mapid='2', weather_idx=2, showmap=False, model_type="openv
         logger.info(f"找到 {len(walker_blueprints)} 种行人类型")
 
         # 设置要生成的行人数量
-        num_walkers = 50
+        num_walkers = 10
 
         # 生成行人的spawn点
         walker_spawn_points = []
