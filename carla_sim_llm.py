@@ -17,6 +17,9 @@ import time
 import re
 import threading
 from collections import deque
+import csv
+import os
+from datetime import datetime
 
 # Import from original project structure (copy all needed functions)
 import sys
@@ -445,10 +448,151 @@ def send_control(vehicle, throttle, steer, brake, hand_brake=False, reverse=Fals
     vehicle.apply_control(control)
 
 
+def save_evaluation_to_csv(evaluation_report, cross_track_list, detections, end_reason, logger):
+    """将评估数据保存为单个CSV文件"""
+    try:
+        # 创建保存数据的文件夹
+        data_folder = "evaluation_data"
+        if not os.path.exists(data_folder):
+            os.makedirs(data_folder)
+            logger.info(f"📁 创建了数据保存文件夹: {data_folder}")
+        
+        # 生成时间戳
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # 获取各项性能指标
+        traj_perf = evaluation_report['trajectory_performance']
+        safety_perf = evaluation_report['safety_performance']
+        eff_perf = evaluation_report['efficiency_performance']
+        comfort_perf = evaluation_report['comfort_performance']
+        perception_perf = evaluation_report['perception_performance']
+        decision_perf = evaluation_report['decision_performance']
+        overall_score = evaluation_report['overall_score']
+        
+        # 计算驾驶技能评分
+        lane_score = max(0, 100 - traj_perf['mean_cross_track_error'] * 100)
+        speed_score = max(0, 100 - traj_perf['mean_speed_error'] * 15)
+        smooth_score = max(0, 100 - eff_perf['mean_jerk'] * 30)
+        steering_score = max(0, 100 - comfort_perf['mean_steering_rate'] * 80)
+        driving_skill_score = (lane_score * 0.35 + speed_score * 0.25 + smooth_score * 0.25 + steering_score * 0.15)
+        driving_skill_score = min(100, max(0, driving_skill_score))
+        
+        # 计算轨迹统计信息
+        cross_track_stats = {}
+        if cross_track_list:
+            cross_track_stats = {
+                '轨迹数据点数': len(cross_track_list),
+                '横向偏差最小值_像素': min(cross_track_list),
+                '横向偏差最大值_像素': max(cross_track_list),
+                '横向偏差平均值_像素': round(np.mean(cross_track_list), 2),
+                '横向偏差标准差_像素': round(np.std(cross_track_list), 2),
+            }
+        else:
+            cross_track_stats = {
+                '轨迹数据点数': 0,
+                '横向偏差最小值_像素': 0,
+                '横向偏差最大值_像素': 0,
+                '横向偏差平均值_像素': 0,
+                '横向偏差标准差_像素': 0,
+            }
+        
+        # 准备完整的CSV数据
+        evaluation_data = {
+            # 基本信息
+            '时间戳': timestamp,
+            '结束原因': end_reason,
+            '总体评分': round(overall_score, 2),
+            '驾驶技能评分': round(driving_skill_score, 2),
+            '仿真帧数': len(cross_track_list),
+            '实际仿真时间_秒': round(eff_perf['total_time'], 2),
+            '平均帧率_FPS': round(len(cross_track_list)/max(eff_perf['total_time'], 1), 2),
+            '检测物体总数': sum(len(dets) if isinstance(dets, list) else 0 for dets in [detections]),
+            
+            # 轨迹跟踪性能
+            '平均横向偏差_m': round(traj_perf['mean_cross_track_error'], 4),
+            '最大横向偏差_m': round(traj_perf['max_cross_track_error'], 4),
+            '横向偏差标准差_m': round(traj_perf['std_cross_track_error'], 4),
+            '平均航向偏差_rad': round(traj_perf['mean_heading_error'], 4),
+            '平均航向偏差_度': round(np.degrees(traj_perf['mean_heading_error']), 2),
+            '最大航向偏差_rad': round(traj_perf['max_heading_error'], 4),
+            '平均速度偏差_ms': round(traj_perf['mean_speed_error'], 3),
+            '最大速度偏差_ms': round(traj_perf['max_speed_error'], 3),
+            
+            # 安全性能
+            '碰撞次数': safety_perf['collision_count'],
+            '碰撞率_per1000frames': round(safety_perf['collision_rate'], 4),
+            '差点碰撞次数': safety_perf['near_collision_count'],
+            '差点碰撞率_per1000frames': round(safety_perf['near_collision_rate'], 4),
+            '交通灯违规次数': safety_perf['traffic_light_violations'],
+            '停车标志违规次数': safety_perf['stop_sign_violations'],
+            '变道违规次数': safety_perf['lane_change_violations'],
+            '平均安全距离_m': round(safety_perf['mean_min_distance_to_objects'], 3),
+            '最小安全距离_m': round(safety_perf['min_distance_to_objects'], 3),
+            
+            # 效率性能
+            '平均速度_ms': round(eff_perf['mean_speed'], 3),
+            '平均速度_kmh': round(eff_perf['mean_speed'] * 3.6, 2),
+            '最高速度_ms': round(eff_perf['max_speed'], 3),
+            '最高速度_kmh': round(eff_perf['max_speed'] * 3.6, 2),
+            '平均加速度_ms2': round(eff_perf['mean_acceleration'], 3),
+            '最大加速度_ms2': round(eff_perf['max_acceleration'], 3),
+            '平均急动度_ms3': round(eff_perf['mean_jerk'], 3),
+            '最大急动度_ms3': round(eff_perf['max_jerk'], 3),
+            '总行驶距离_m': round(eff_perf['total_distance'], 2),
+            '路线完成率_percent': round(eff_perf['route_completion_rate'] * 100, 1),
+            '平均行驶速度_ms': round(eff_perf['average_speed'], 3),
+            
+            # 舒适性能
+            '平均横向加速度_ms2': round(comfort_perf['mean_lateral_acceleration'], 3),
+            '最大横向加速度_ms2': round(comfort_perf['max_lateral_acceleration'], 3),
+            '平均转向角度_rad': round(comfort_perf['mean_steering_angle'], 4),
+            '平均转向角度_度': round(np.degrees(comfort_perf['mean_steering_angle']), 2),
+            '最大转向角度_rad': round(comfort_perf['max_steering_angle'], 4),
+            '最大转向角度_度': round(np.degrees(comfort_perf['max_steering_angle']), 2),
+            '平均转向速率_rads': round(comfort_perf['mean_steering_rate'], 4),
+            '最大转向速率_rads': round(comfort_perf['max_steering_rate'], 4),
+            '平均油门变化率': round(comfort_perf['mean_throttle_change'], 4),
+            '最大油门变化率': round(comfort_perf['max_throttle_change'], 4),
+            '平均刹车变化率': round(comfort_perf['mean_brake_change'], 4),
+            '最大刹车变化率': round(comfort_perf['max_brake_change'], 4),
+            
+            # 感知性能
+            '目标检测准确率_percent': round(perception_perf['mean_object_detection_accuracy'] * 100, 1),
+            '车道检测准确率_percent': round(perception_perf['mean_lane_detection_accuracy'] * 100, 1),
+            '交通灯检测准确率_percent': round(perception_perf['mean_traffic_light_detection_accuracy'] * 100, 1),
+            
+            # 决策性能
+            '平均决策时间_ms': round(decision_perf['mean_decision_time'] * 1000, 2),
+            '最大决策时间_ms': round(decision_perf['max_decision_time'] * 1000, 2),
+            '超车成功率_percent': round(decision_perf['overtaking_success_rate'] * 100, 1),
+            '变道成功率_percent': round(decision_perf['lane_change_success_rate'] * 100, 1),
+        }
+        
+        # 合并轨迹统计信息
+        evaluation_data.update(cross_track_stats)
+        
+        # 保存为单个CSV文件
+        csv_file = os.path.join(data_folder, f"driving_evaluation_{timestamp}.csv")
+        with open(csv_file, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=evaluation_data.keys())
+            writer.writeheader()
+            writer.writerow(evaluation_data)
+        
+        logger.info(f"💾 完整评估数据已保存到: {csv_file}")
+        logger.info(f"📁 文件位置: {os.path.abspath(csv_file)}")
+        logger.info(f"📊 包含 {len(evaluation_data)} 个评估指标")
+        
+    except Exception as e:
+        logger.error(f"❌ 保存CSV数据时出错: {e}")
+
+
 def generate_evaluation_report(eval_metrics, cross_track_list, detections, logger, end_reason="仿真结束"):
     """生成并打印详细的评估报告"""
     # 获取完整评估报告
     evaluation_report = eval_metrics.get_full_report()
+    
+    # 保存CSV数据
+    save_evaluation_to_csv(evaluation_report, cross_track_list, detections, end_reason, logger)
     
     # 打印评估报告
     logger.info("=" * 60)
