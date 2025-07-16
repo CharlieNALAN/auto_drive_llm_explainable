@@ -10,7 +10,7 @@ import queue
 import time
 from collections import deque
 
-# transformers 不再需要，因为我们使用 API 方式
+# transformers no longer needed since we use API approach
 TRANSFORMERS_AVAILABLE = False
 
 
@@ -20,7 +20,7 @@ class LLMExplainer:
         self.model_type = model_type
         self.logger = logging.getLogger(__name__)
         
-        # 初始化 API 相关变量
+        # Initialize API related variables
         self.api_key = None
         self.api_base_url = None
         self.api_model = None
@@ -36,14 +36,14 @@ class LLMExplainer:
             self.model_type = "fallback"
     
     def _initialize_deepseek_api(self):
-        """初始化 Deepseek API 配置"""
-        # 从配置中获取 API 密钥和基础 URL
+        """Initialize Deepseek API configuration"""
+        # Get API key and base URL from configuration
         self.api_key = self.config.get('api_key')
         self.api_base_url = self.config.get('api_base_url', 'https://api.deepseek.com/v1')
         self.api_model = self.config.get('api_model', 'deepseek-chat')
         
         if not self.api_key:
-            # 尝试从环境变量获取
+            # Try to get from environment variable
             self.api_key = os.getenv('DEEPSEEK_API_KEY')
             
         if not self.api_key:
@@ -51,23 +51,23 @@ class LLMExplainer:
         
         self.logger.info(f"Deepseek API initialized with model: {self.api_model}")
         
-        # 测试 API 连接
+        # Test API connection
         try:
-            self._call_deepseek_api("测试连接", max_tokens=10)
+            self._call_deepseek_api("Test connection", max_tokens=10)
             self.logger.info("Deepseek API connection test successful")
         except Exception as e:
             self.logger.warning(f"Deepseek API test failed: {e}")
             raise
     
     def _call_deepseek_api(self, prompt, max_tokens=150, temperature=0.7):
-        """调用 Deepseek API"""
+        """Call Deepseek API"""
         headers = {
             'Authorization': f'Bearer {self.api_key}',
             'Content-Type': 'application/json'
         }
         
-        # 设置系统提示，确保生成简洁精确的中文驾驶解释
-        system_prompt = """你是一个自动驾驶汽车的AI解释员。请根据给定的驾驶数据生成简洁、准确、直击要点的中文解释。一句话。"""
+        # Set system prompt to ensure concise and accurate English driving explanations
+        system_prompt = """You are an AI explainer for autonomous vehicles. Please generate concise, accurate, and direct English explanations based on the given driving data. Keep it to one sentence."""
         
         data = {
             'model': self.api_model,
@@ -113,12 +113,12 @@ class LLMExplainer:
             return self._explain_fallback(data)
     
     def _explain_with_deepseek_api(self, data):
-        """使用 Deepseek API 生成驾驶解释"""
+        """Generate driving explanation using Deepseek API"""
         try:
             prompt = self._build_prompt(data)
             explanation = self._call_deepseek_api(prompt, max_tokens=100, temperature=0.7)
             
-            # 如果生成的解释为空或太短，使用备用方法
+            # If generated explanation is empty or too short, use fallback method
             if not explanation or len(explanation) < 5:
                 self.logger.warning("API generated explanation too short, using fallback")
                 return self._explain_fallback(data)
@@ -130,13 +130,13 @@ class LLMExplainer:
             return self._explain_fallback(data)
     
     def _build_prompt(self, data):
-        """构建给 LLM 的 prompt"""
+        """Build prompt for LLM"""
         vehicle_state = data.get('vehicle_state', {})
         road_context = data.get('road_context', {})
         perception = data.get('perception', {})
         detected_objects = data.get('detected_objects', {})
         
-        # 提取关键信息
+        # Extract key information
         speed_kmh = vehicle_state.get('speed_kmh', 0)
         target_speed = vehicle_state.get('target_speed', 0)
         control = vehicle_state.get('control', {})
@@ -152,38 +152,38 @@ class LLMExplainer:
         cross_track_error = perception.get('cross_track_error', 0)
         lane_tracking_quality = perception.get('lane_tracking_quality', 'unknown')
         
-        # 检测到的物体信息
+        # Detected objects information
         traffic_lights = detected_objects.get('traffic_lights', [])
         nearby_vehicles = detected_objects.get('nearby_vehicles', [])
         pedestrians = detected_objects.get('pedestrians', [])
         critical_objects = detected_objects.get('critical_objects', [])
         
-        prompt = f"""你是一个自动驾驶汽车的解释系统，请根据以下信息生成简洁的中文驾驶行为解释：
+        prompt = f"""You are an autonomous vehicle explanation system. Please generate a concise English driving behavior explanation based on the following information:
 
-车辆状态：
-- 当前速度：{speed_kmh:.1f} km/h
-- 目标速度：{target_speed:.1f} km/h
-- 油门：{throttle:.2f}，转向：{steer:.2f}，制动：{brake:.2f}
+Vehicle State:
+- Current speed: {speed_kmh:.1f} km/h
+- Target speed: {target_speed:.1f} km/h
+- Throttle: {throttle:.2f}, Steering: {steer:.2f}, Brake: {brake:.2f}
 
-道路环境：
-- 车道跟踪质量：{lane_tracking_quality}
-- 横向偏差：{cross_track_error:.2f}m
-- 轨迹曲率：{trajectory_curvature:.4f}
-- 是否在交叉口：{"是" if is_junction else "否"}
-- 导航模式：{navigation_mode}
+Road Environment:
+- Lane tracking quality: {lane_tracking_quality}
+- Lateral deviation: {cross_track_error:.2f}m
+- Trajectory curvature: {trajectory_curvature:.4f}
+- At intersection: {"Yes" if is_junction else "No"}
+- Navigation mode: {navigation_mode}
 
-检测到的物体：
-- 交通灯：{len(traffic_lights)}个
-- 附近车辆：{len(nearby_vehicles)}辆
-- 行人：{len(pedestrians)}名
-- 关键物体：{len(critical_objects)}个
+Detected Objects:
+- Traffic lights: {len(traffic_lights)} detected
+- Nearby vehicles: {len(nearby_vehicles)} detected
+- Pedestrians: {len(pedestrians)} detected
+- Critical objects: {len(critical_objects)} detected
 
-请生成一句话的驾驶行为解释，描述当前在做什么以及原因。回复要简洁、准确、符合中文表达习惯。"""
+Please generate a single sentence explanation describing what the vehicle is currently doing and why. Keep it concise, accurate, and natural in English."""
 
         return prompt
     
     def _explain_fallback(self, data):
-        """备用的基于规则的解释方法"""
+        """Fallback rule-based explanation method"""
         vehicle_state = data.get('vehicle_state', {})
         road_context = data.get('road_context', {})
         perception = data.get('perception', {})
@@ -210,49 +210,49 @@ class LLMExplainer:
         # Basic driving action description
         if speed_kmh < 1:
             if brake > 0.1:
-                action = "制动停车"
+                action = "braking to stop"
             else:
-                action = "静止"
+                action = "stationary"
         elif brake > 0.1:
-            action = "制动减速"
+            action = "braking"
         elif throttle > 0.1:
             if speed_kmh < target_speed - 1:
-                action = "加速中"
+                action = "accelerating"
             else:
-                action = "维持速度"
+                action = "maintaining speed"
         elif abs(steer) > 0.1:
             if trajectory_curvature > 0.01:
-                direction = "右转" if steer > 0 else "左转"
-                action = f"过弯{direction}"
+                direction = "right" if steer > 0 else "left"
+                action = f"turning {direction}"
             else:
-                direction = "右转" if steer > 0 else "左转"
-                action = f"轻微{direction}"
+                direction = "right" if steer > 0 else "left"
+                action = f"steering slightly {direction}"
         else:
-            action = "直行"
+            action = "driving straight"
         
         # Speed information
         if abs(speed_kmh - target_speed) > 2:
-            speed_status = f"当前{speed_kmh:.1f}km/h，目标{target_speed:.1f}km/h"
+            speed_status = f"at {speed_kmh:.1f}km/h, target {target_speed:.1f}km/h"
         else:
-            speed_status = f"{speed_kmh:.1f}km/h"
+            speed_status = f"at {speed_kmh:.1f}km/h"
         
-        explanation = f"{action}，{speed_status}"
+        explanation = f"Vehicle is {action} {speed_status}"
         
         # Lane tracking quality
         if lane_tracking_quality == "good":
-            explanation += "，车道保持良好"
+            explanation += " with good lane keeping"
         elif lane_tracking_quality == "poor":
-            explanation += f"，车道偏差{cross_track_error:.1f}m"
+            explanation += f" with {cross_track_error:.1f}m lane deviation"
         
         # Road context information
         if current_lane.get('is_junction'):
-            explanation += "，正在通过交叉口"
+            explanation += " while passing through intersection"
         elif trajectory_curvature > 0.01:
-            explanation += "，正在过弯"
+            explanation += " while navigating curve"
         
         # Navigation mode
         if navigation_mode == "map_based":
-            explanation += "（地图导航）"
+            explanation += " (map navigation)"
         
         # Process detected objects by category
         traffic_light_info = []
@@ -265,9 +265,9 @@ class LLMExplainer:
             state = tl.get('state', 'unknown')
             if state != 'unknown':
                 if tl.get('is_close', False):
-                    traffic_light_info.append(f"前方{state}灯")
+                    traffic_light_info.append(f"{state} light ahead")
                 else:
-                    traffic_light_info.append(f"远处{state}灯")
+                    traffic_light_info.append(f"{state} light distant")
         
         # Nearby vehicles
         close_vehicles = [v for v in detected_objects.get('nearby_vehicles', []) if v.get('is_close', False)]
@@ -276,35 +276,35 @@ class LLMExplainer:
             for v in close_vehicles:
                 vtype = v.get('class', 'vehicle')
                 if vtype == 'car':
-                    vtype = '汽车'
+                    vtype = 'car'
                 elif vtype == 'truck':
-                    vtype = '卡车'
+                    vtype = 'truck'
                 elif vtype == 'bus':
-                    vtype = '公交车'
+                    vtype = 'bus'
                 elif vtype == 'motorcycle':
-                    vtype = '摩托车'
+                    vtype = 'motorcycle'
                 vehicle_types[vtype] = vehicle_types.get(vtype, 0) + 1
             
             for vtype, count in vehicle_types.items():
                 if count == 1:
-                    vehicle_info.append(f"前方{vtype}")
+                    vehicle_info.append(f"{vtype} ahead")
                 else:
-                    vehicle_info.append(f"前方{count}辆{vtype}")
+                    vehicle_info.append(f"{count} {vtype}s ahead")
         
         # Pedestrians
         close_pedestrians = [p for p in detected_objects.get('pedestrians', []) if p.get('is_close', False)]
         if close_pedestrians:
             pedestrian_count = len(close_pedestrians)
             if pedestrian_count == 1:
-                pedestrian_info.append("前方行人")
+                pedestrian_info.append("pedestrian ahead")
             else:
-                pedestrian_info.append(f"前方{pedestrian_count}名行人")
+                pedestrian_info.append(f"{pedestrian_count} pedestrians ahead")
         
         # Critical objects
         for obj in detected_objects.get('critical_objects', []):
             obj_class = obj.get('class', 'object')
             if obj_class == 'stop sign':
-                critical_info.append("停止标志")
+                critical_info.append("stop sign")
             else:
                 critical_info.append(obj_class)
         
@@ -320,7 +320,7 @@ class LLMExplainer:
             all_objects.extend(pedestrian_info)
         
         if all_objects:
-            explanation += f"。检测到：{', '.join(all_objects)}"
+            explanation += f". Detected: {', '.join(all_objects)}"
         
         # Upcoming road information
         if upcoming_waypoints:
@@ -328,9 +328,9 @@ class LLMExplainer:
             if next_wp.get('lane_change') != 'NONE':
                 lane_change = next_wp.get('lane_change', '')
                 if 'Left' in str(lane_change):
-                    explanation += "，即将左转"
+                    explanation += ", preparing to turn left"
                 elif 'Right' in str(lane_change):
-                    explanation += "，即将右转"
+                    explanation += ", preparing to turn right"
         
         return explanation
     
@@ -338,12 +338,13 @@ class ThreadedLLMExplainer(threading.Thread):
     """
     A threaded LLM explainer that runs in the background to avoid blocking the main simulation loop.
     """
-    def __init__(self, llm_explainer, max_queue_size=10):
+    def __init__(self, llm_explainer, max_queue_size=10, display_callback=None):
         super().__init__(daemon=True)
         self.llm_explainer = llm_explainer
         self.input_queue = queue.Queue(maxsize=max_queue_size)
         self.stop_event = threading.Event()
         self.logger = logging.getLogger(__name__ + '.ThreadedLLMExplainer')
+        self.display_callback = display_callback  # Callback function for pygame display
         
         # Keep track of recent explanations
         self.recent_explanations = deque(maxlen=5)
@@ -370,6 +371,10 @@ class ThreadedLLMExplainer(threading.Thread):
                 })
                 
                 self.logger.info(f"LLM: {explanation} (processed in {processing_time:.2f}s)")
+                
+                # Call display callback if provided
+                if self.display_callback:
+                    self.display_callback(explanation)
                 
                 # Mark the task as done
                 self.input_queue.task_done()
