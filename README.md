@@ -14,7 +14,6 @@ This project builds an explainable autonomous driving system using Large Languag
 │   ├── explainability/  # LLM-based explanation modules
 │   └── utils/           # Utility functions
 ├── carla_sim_llm.py     # Main entry point (integrated implementation)
-├── main.py              # Legacy modular implementation (deprecated)
 ├── run_carla.py         # Script to start CARLA server
 └── requirements.txt     # Python dependencies
 ```
@@ -51,7 +50,7 @@ The main system now runs from `carla_sim_llm.py`. This file contains a complete 
    python run_carla.py
    ```
 
-2. Run the autonomous driving system:
+2. Then Run the autonomous driving system:
    ```bash
    python carla_sim_llm.py
    ```
